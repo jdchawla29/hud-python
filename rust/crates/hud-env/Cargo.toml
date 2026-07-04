@@ -1,0 +1,20 @@
+[package]
+name = "hud-env"
+description = "HUD environment authoring and protocol server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+futures.workspace = true
+hud-types.workspace = true
+hud-wire.workspace = true
+indexmap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true

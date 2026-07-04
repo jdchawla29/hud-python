@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/hud-types",
+    "crates/hud-wire",
+    "crates/hud-env",
+    "crates/hud-client",
+    "crates/hud-eval",
+    "crates/hud",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/hud-evals/hud-rs"
+
+[workspace.dependencies]
+hud-types = { path = "crates/hud-types" }
+hud-wire = { path = "crates/hud-wire" }
+hud-env = { path = "crates/hud-env" }
+hud-client = { path = "crates/hud-client" }
+hud-eval = { path = "crates/hud-eval" }
+
+async-trait = "0.1"
+futures = "0.3"
+indexmap = { version = "2", features = ["serde"] }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha1 = "0.10"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting"] }
+tokio = { version = "1", features = [
+    "io-util",
+    "macros",
+    "net",
+    "process",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
