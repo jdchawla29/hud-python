@@ -203,6 +203,7 @@ pub struct LocalRuntime {
     /// sources defining several environments).
     pass_env_flag: bool,
     cwd: Option<PathBuf>,
+    envs: Vec<(String, String)>,
     ready_timeout: Duration,
 }
 
@@ -213,6 +214,7 @@ impl LocalRuntime {
             argv: argv.into_iter().map(Into::into).collect(),
             pass_env_flag: false,
             cwd: None,
+            envs: Vec::new(),
             ready_timeout: Duration::from_secs(120),
         }
     }
@@ -242,12 +244,19 @@ impl LocalRuntime {
             ],
             pass_env_flag: true,
             cwd: Some(cwd),
+            envs: Vec::new(),
             ready_timeout: Duration::from_secs(120),
         }
     }
 
     pub fn cwd(mut self, cwd: impl Into<PathBuf>) -> LocalRuntime {
         self.cwd = Some(cwd.into());
+        self
+    }
+
+    /// Set an environment variable on the spawned serving process.
+    pub fn env_var(mut self, key: impl Into<String>, value: impl Into<String>) -> LocalRuntime {
+        self.envs.push((key.into(), value.into()));
         self
     }
 
@@ -282,6 +291,9 @@ impl Provider for LocalRuntime {
         }
         if let Some(cwd) = &self.cwd {
             command.current_dir(cwd);
+        }
+        for (key, value) in &self.envs {
+            command.env(key, value);
         }
         #[cfg(unix)]
         command.process_group(0);

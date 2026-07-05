@@ -6,6 +6,9 @@
 
 mod client;
 mod connect;
+pub mod filetracking;
+#[cfg(feature = "ssh")]
+pub mod ssh;
 
 pub use client::{HudClient, HudClientError, Manifest, ServerInfo};
 pub use connect::{connect, ConnectOptions};

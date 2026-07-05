@@ -1,0 +1,27 @@
+[package]
+name = "slate"
+description = "Slate-style thread-weaving coding agent TUI on the HUD Rust SDK"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+dotenvy.workspace = true
+futures.workspace = true
+hud-client = { workspace = true, features = ["ssh"] }
+hud-eval.workspace = true
+hud-types.workspace = true
+indexmap.workspace = true
+ratatui.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time = { workspace = true, features = ["formatting"] }
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
