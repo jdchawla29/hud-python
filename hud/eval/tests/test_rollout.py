@@ -274,6 +274,87 @@ async def test_rollout_drains_an_in_flight_keepalive_before_grading(
     assert run.reward == 1.0
 
 
+async def test_stalled_keepalive_is_bounded_before_grading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    env = Environment("sums")
+
+    @env.template()
+    async def add(a: int, b: int):
+        answer = yield f"add:{a}:{b}"
+        yield 1.0 if answer == str(a + b) else 0.0
+
+    async def stalled_keepalive(self: HudClient) -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    class _FinishWhileKeepaliveIsStalled(Agent):
+        async def __call__(self, run: Any) -> None:
+            await started.wait()
+            run.trace.content = _solve_add(run.prompt)
+
+    monkeypatch.setattr(run_module, "_CONTROL_KEEPALIVE_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(
+        run_module,
+        "_CONTROL_KEEPALIVE_DRAIN_TIMEOUT_SECONDS",
+        0.0,
+        raising=False,
+    )
+    monkeypatch.setattr(HudClient, "keepalive", stalled_keepalive)
+
+    run = await rollout(
+        _add_task(2, 3),
+        _FinishWhileKeepaliveIsStalled(),
+        runtime=lambda _row: _local_with_control_keepalive(env),
+        rollout_timeout=0.5,
+    )
+
+    assert cancelled.is_set()
+    assert run.trace.status == "error"
+    assert run.trace.stop_reason is None
+    assert "[grading]" in (run.trace.error or "")
+
+
+async def test_keepalive_error_does_not_fail_a_successful_rollout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempted = asyncio.Event()
+    env = Environment("sums")
+
+    @env.template()
+    async def add(a: int, b: int):
+        answer = yield f"add:{a}:{b}"
+        yield 1.0 if answer == str(a + b) else 0.0
+
+    async def malformed_keepalive(self: HudClient) -> None:
+        attempted.set()
+        raise ValueError("malformed keepalive reply")
+
+    class _FinishAfterKeepaliveAttempt(Agent):
+        async def __call__(self, run: Any) -> None:
+            await attempted.wait()
+            run.trace.content = _solve_add(run.prompt)
+
+    monkeypatch.setattr(run_module, "_CONTROL_KEEPALIVE_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(HudClient, "keepalive", malformed_keepalive)
+
+    run = await rollout(
+        _add_task(2, 3),
+        _FinishAfterKeepaliveAttempt(),
+        runtime=lambda _row: _local_with_control_keepalive(env),
+        rollout_timeout=0.5,
+    )
+
+    assert attempted.is_set()
+    assert run.trace.status == "completed"
+    assert run.reward == 1.0
+
+
 async def test_grade_connection_reset_is_attributed_to_grading(
     env_file: Path,
     monkeypatch: pytest.MonkeyPatch,

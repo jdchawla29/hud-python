@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any, Self, cast
 
 import mcp.types as mcp_types
 
-from hud.clients import HudProtocolError, connect
+from hud.clients import connect
 from hud.graders.results import SubScore
 from hud.telemetry.context import set_trace_context
 from hud.types import Step, TaskCall, Trace
@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("hud.eval.run")
 _CONTROL_KEEPALIVE_INTERVAL_SECONDS = 30.0
+_CONTROL_KEEPALIVE_DRAIN_TIMEOUT_SECONDS = 2.0
 
 
 @contextlib.asynccontextmanager
@@ -76,7 +77,7 @@ async def _keep_control_session_alive(
             except TimeoutError:
                 try:
                     await client.keepalive()
-                except (EOFError, OSError, HudProtocolError) as exc:
+                except Exception as exc:
                     logger.warning("control session keepalive failed: %s", exc)
                     return
 
@@ -85,7 +86,21 @@ async def _keep_control_session_alive(
         yield
     finally:
         stop.set()
-        await task
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=_CONTROL_KEEPALIVE_DRAIN_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning("control session keepalive timed out; aborting transport")
+            client.abort()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        except asyncio.CancelledError:
+            client.abort()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
 
 
 def _prompt_message(item: Any) -> mcp_types.PromptMessage:
