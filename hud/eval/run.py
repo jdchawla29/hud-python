@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any, Self, cast
 
 import mcp.types as mcp_types
 
-from hud.clients import connect
+from hud.clients import HudProtocolError, connect
 from hud.graders.results import SubScore
 from hud.telemetry.context import set_trace_context
 from hud.types import Step, TaskCall, Trace
@@ -41,6 +41,7 @@ from .file_tracking import file_tracking_observer
 from .job import job_enter, trace_enter, trace_exit
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from types import TracebackType
 
     from hud.agents.base import Agent
@@ -50,6 +51,41 @@ if TYPE_CHECKING:
     from .task import Task
 
 logger = logging.getLogger("hud.eval.run")
+_CONTROL_KEEPALIVE_INTERVAL_SECONDS = 30.0
+
+
+@contextlib.asynccontextmanager
+async def _keep_control_session_alive(
+    client: HudClient,
+    *,
+    enabled: bool,
+) -> AsyncIterator[None]:
+    if not enabled:
+        yield
+        return
+
+    stop = asyncio.Event()
+
+    async def pulse() -> None:
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(
+                    stop.wait(),
+                    timeout=_CONTROL_KEEPALIVE_INTERVAL_SECONDS,
+                )
+            except TimeoutError:
+                try:
+                    await client.keepalive()
+                except (EOFError, OSError, HudProtocolError) as exc:
+                    logger.warning("control session keepalive failed: %s", exc)
+                    return
+
+    task = asyncio.create_task(pulse())
+    try:
+        yield
+    finally:
+        stop.set()
+        await task
 
 
 def _prompt_message(item: Any) -> mcp_types.PromptMessage:
@@ -366,11 +402,12 @@ async def rollout(
         )
         run: Run | None = None
         _phase = "provisioning"
+        _failure: tuple[str, Exception] | None = None
 
         client: HudClient | None = None
 
         async def _drive() -> None:
-            nonlocal client, run, _phase
+            nonlocal client, run, _failure, _phase
             async with contextlib.AsyncExitStack() as stack:
                 addr = cast("Runtime", await stack.enter_async_context(runtime(task)))
                 _phase = "starting task"
@@ -381,9 +418,23 @@ async def rollout(
                     async with live:  # start on enter; grade on exit
                         run = live  # bound only once live: an earlier failure synthesizes
                         _phase = "agent loop"
-                        async with file_tracking_observer(client):
+                        async with (
+                            _keep_control_session_alive(
+                                client,
+                                enabled=addr.params.get("control_keepalive") is True,
+                            ),
+                            file_tracking_observer(client),
+                        ):
                             await agent(run)
                         _phase = "grading"
+                except Exception as exc:
+                    _failure = (_phase, exc)
+                    if run is not None:
+                        detail = "".join(traceback.format_exception_only(exc)).strip()
+                        logger.warning("rollout failed mid-run (%s): %s", _phase, detail)
+                        run.trace.status = "error"
+                        run.record(Step(source="system", error=f"[{_phase}] {detail}"))
+                    raise
                 finally:
                     _phase = "cleanup"
 
@@ -432,9 +483,15 @@ async def rollout(
             # handshake — where str(exc) would drop them.
             detail = "".join(traceback.format_exception_only(exc)).strip()
             if run is None:
-                logger.warning("rollout failed before launch (%s): %s", _phase, detail)
-                run = Run.failed(f"[{_phase}] {detail}")
-            else:
+                failure_phase, failure = _failure or (_phase, exc)
+                failure_detail = "".join(traceback.format_exception_only(failure)).strip()
+                logger.warning(
+                    "rollout failed before launch (%s): %s",
+                    failure_phase,
+                    failure_detail,
+                )
+                run = Run.failed(f"[{failure_phase}] {failure_detail}")
+            elif _failure is None or exc is not _failure[1]:
                 logger.warning("rollout failed mid-run (%s): %s", _phase, detail)
                 run.trace.status = "error"
                 run.record(Step(source="system", error=f"[{_phase}] {detail}"))

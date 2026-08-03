@@ -54,6 +54,38 @@ async def test_connect_retries_through_accept_then_eof_until_the_env_serves() ->
     assert attempts == 3
 
 
+async def test_keepalive_reuses_the_live_session_without_rebuilding_bindings() -> None:
+    requests: list[dict[str, object]] = []
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            for _ in range(2):
+                msg = await read_frame(reader)
+                assert msg is not None
+                requests.append(msg)
+                await send_frame(
+                    writer,
+                    {"jsonrpc": "2.0", "id": msg["id"], "result": HELLO_RESULT},
+                )
+            await read_frame(reader)
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        async with connect(Runtime(f"tcp://127.0.0.1:{port}")) as client:
+            manifest = client.manifest
+            await client.keepalive()
+            assert client.manifest is manifest
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert [request["method"] for request in requests] == ["hello", "hello"]
+    assert requests[1]["params"] == {"session_id": "s-1"}
+
+
 async def test_connect_uses_runtime_ready_timeout_param(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

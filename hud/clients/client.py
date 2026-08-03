@@ -100,6 +100,7 @@ class HudClient:
         #: raw stream pairs (no dialable endpoint): bindings pass through.
         self._endpoint = endpoint
         self._ids = itertools.count(1)
+        self._call_lock = asyncio.Lock()
         self._closed = False
         self.manifest: Manifest | None = None
         self._opened: dict[str, CapabilityClient] = {}
@@ -290,6 +291,15 @@ class HudClient:
         """Start a task; returns the first yield (``{"prompt": ...}``)."""
         return await self._call("tasks.start", {"id": task_id, "args": args or {}})
 
+    async def keepalive(self) -> None:
+        """Keep this session's control transport active without rebuilding bindings."""
+        if self.manifest is None:
+            raise RuntimeError("call hello() before keeping the session alive")
+        session_id = self.manifest.session_id
+        result = await self._call("hello", {"session_id": session_id})
+        if result.get("session_id") != session_id:
+            raise HudProtocolError(-32603, "hello: session changed during keepalive")
+
     async def grade(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Send ``tasks.grade``; returns the evaluation dict (``{"score": ...}``)."""
         return await self._call("tasks.grade", payload)
@@ -300,23 +310,24 @@ class HudClient:
     # ─── JSON-RPC plumbing ────────────────────────────────────────────
 
     async def _call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        msg_id = next(self._ids)
-        await send_frame(
-            self._writer,
-            {"jsonrpc": "2.0", "id": msg_id, "method": method, "params": params},
-        )
-        reply = await read_frame(self._reader)
-        if reply is None:
-            # Connection-level event, not a protocol error: the peer hung up
-            # without answering (e.g. a proxied port whose backend isn't up).
-            raise EOFError(f"env closed connection during {method!r}")
-        if "error" in reply:
-            err = reply["error"]
-            raise HudProtocolError(int(err.get("code", -32000)), str(err.get("message", "")))
-        result = reply.get("result")
-        if not isinstance(result, dict):
-            raise HudProtocolError(-32603, f"{method!r}: result was not an object")
-        return result
+        async with self._call_lock:
+            msg_id = next(self._ids)
+            await send_frame(
+                self._writer,
+                {"jsonrpc": "2.0", "id": msg_id, "method": method, "params": params},
+            )
+            reply = await read_frame(self._reader)
+            if reply is None:
+                # Connection-level event, not a protocol error: the peer hung up
+                # without answering (e.g. a proxied port whose backend isn't up).
+                raise EOFError(f"env closed connection during {method!r}")
+            if "error" in reply:
+                err = reply["error"]
+                raise HudProtocolError(int(err.get("code", -32000)), str(err.get("message", "")))
+            result = reply.get("result")
+            if not isinstance(result, dict):
+                raise HudProtocolError(-32603, f"{method!r}: result was not an object")
+            return result
 
 
 # ─── module-level entry points ────────────────────────────────────────

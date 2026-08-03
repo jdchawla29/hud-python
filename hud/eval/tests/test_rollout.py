@@ -27,19 +27,20 @@ from typing import TYPE_CHECKING, Any
 import mcp.types as mcp_types
 import pytest
 
+import hud.eval.run as run_module
 from hud.agents.base import Agent
 from hud.agents.openai_compatible import OpenAIChatAgent
 from hud.agents.types import OpenAIChatConfig
+from hud.clients.client import HudClient
 from hud.environment import Environment
 from hud.eval import Job, SubprocessRuntime, Task, Taskset
 from hud.eval.run import Run, rollout
-from hud.eval.runtime import _local
+from hud.eval.runtime import Runtime, _local
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from hud.eval.runtime import Runtime
     from hud.eval.task import Task as TaskRow
 
 _SUMS_ENV = """\
@@ -120,6 +121,12 @@ def _solve_add(prompt: str) -> str:
     return str(int(a) + int(b))
 
 
+@asynccontextmanager
+async def _local_with_control_keepalive(env: Environment) -> AsyncIterator[Runtime]:
+    async with _local(env) as runtime:
+        yield Runtime(runtime.url, params={"control_keepalive": True})
+
+
 def _pid_status(pid: int) -> str | None:
     result = subprocess.run(
         ["ps", "-o", "stat=", "-p", str(pid)],
@@ -165,6 +172,128 @@ async def test_rollout_returns_graded_run_with_trace_id(env_file: Path) -> None:
     # The factual placement record: the runtime this run executed against.
     assert run.runtime is not None
     assert run.runtime.startswith("tcp://127.0.0.1:")
+
+
+async def test_long_agent_loop_keeps_the_control_session_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    keepalive_sent = asyncio.Event()
+    env = Environment("sums")
+
+    @env.template()
+    async def add(a: int, b: int):
+        answer = yield f"add:{a}:{b}"
+        yield 1.0 if answer == str(a + b) else 0.0
+
+    real_keepalive = HudClient.keepalive
+
+    async def signal_keepalive(self: HudClient) -> None:
+        await real_keepalive(self)
+        keepalive_sent.set()
+
+    class _WaitForKeepaliveAgent(Agent):
+        async def __call__(self, run: Any) -> None:
+            await keepalive_sent.wait()
+            run.trace.content = _solve_add(run.prompt)
+
+    monkeypatch.setattr(
+        run_module,
+        "_CONTROL_KEEPALIVE_INTERVAL_SECONDS",
+        0.0,
+        raising=False,
+    )
+    monkeypatch.setattr(HudClient, "keepalive", signal_keepalive, raising=False)
+
+    run = await rollout(
+        _add_task(2, 3),
+        _WaitForKeepaliveAgent(),
+        runtime=lambda _row: _local_with_control_keepalive(env),
+        rollout_timeout=0.5,
+    )
+
+    assert keepalive_sent.is_set()
+    assert run.trace.status == "completed"
+    assert run.reward == 1.0
+
+    timed_out = await rollout(
+        _add_task(2, 3),
+        _SlowAgent(_solve_add),
+        runtime=lambda _row: _local_with_control_keepalive(env),
+        rollout_timeout=0.2,
+    )
+
+    assert timed_out.trace.status == "error"
+    assert timed_out.trace.stop_reason == "timeout"
+
+
+async def test_rollout_drains_an_in_flight_keepalive_before_grading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    cancelled = asyncio.Event()
+    completed = asyncio.Event()
+    env = Environment("sums")
+
+    @env.template()
+    async def add(a: int, b: int):
+        answer = yield f"add:{a}:{b}"
+        yield 1.0 if answer == str(a + b) else 0.0
+
+    real_keepalive = HudClient.keepalive
+
+    async def delayed_keepalive(self: HudClient) -> None:
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        await real_keepalive(self)
+        completed.set()
+
+    class _FinishWhileKeepaliveIsRunning(Agent):
+        async def __call__(self, run: Any) -> None:
+            await started.wait()
+            run.trace.content = _solve_add(run.prompt)
+            asyncio.get_running_loop().call_soon(release.set)
+
+    monkeypatch.setattr(run_module, "_CONTROL_KEEPALIVE_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(HudClient, "keepalive", delayed_keepalive)
+
+    run = await rollout(
+        _add_task(2, 3),
+        _FinishWhileKeepaliveIsRunning(),
+        runtime=lambda _row: _local_with_control_keepalive(env),
+        rollout_timeout=0.5,
+    )
+
+    assert completed.is_set()
+    assert not cancelled.is_set()
+    assert run.trace.status == "completed"
+    assert run.reward == 1.0
+
+
+async def test_grade_connection_reset_is_attributed_to_grading(
+    env_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def reset_during_grade(
+        self: HudClient,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        raise ConnectionResetError("peer closed before grade reply")
+
+    monkeypatch.setattr(HudClient, "grade", reset_during_grade)
+
+    run = await rollout(
+        _add_task(2, 3),
+        _FnAgent(_solve_add),
+        runtime=SubprocessRuntime(env_file),
+    )
+
+    assert run.trace.status == "error"
+    assert "[grading] ConnectionResetError" in (run.trace.error or "")
 
 
 def _bindings_env(published: Any) -> Environment:
@@ -489,6 +618,93 @@ async def test_timeout_does_not_wait_for_provider_cleanup() -> None:
 
     release_cleanup.set()
     await asyncio.wait_for(cleanup_finished.wait(), 1.0)
+
+
+async def test_grade_failure_does_not_cancel_provider_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = Environment("sums")
+    cleanup_started = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    @env.template()
+    async def add(a: int, b: int):
+        yield f"add:{a}:{b}"
+        yield 1.0
+
+    @asynccontextmanager
+    async def provider(_task: TaskRow) -> AsyncIterator[Runtime]:
+        try:
+            async with _local(env) as runtime:
+                yield runtime
+        finally:
+            cleanup_started.set()
+            await release_cleanup.wait()
+            cleanup_finished.set()
+
+    async def reset_during_grade(
+        self: HudClient,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        raise ConnectionResetError("peer closed before grade reply")
+
+    monkeypatch.setattr(HudClient, "grade", reset_during_grade)
+
+    run = await rollout(
+        _add_task(2, 3),
+        _FnAgent(_solve_add),
+        runtime=provider,
+        rollout_timeout=0.2,
+    )
+
+    assert run.trace.status == "error"
+    assert run.trace.stop_reason == "timeout"
+    assert cleanup_started.is_set()
+    assert not cleanup_finished.is_set()
+    errors = [step.error for step in run.trace.steps if step.error]
+    assert any("[grading] ConnectionResetError" in error for error in errors)
+    assert any("timed out" in error and "cleanup" in error for error in errors)
+
+    release_cleanup.set()
+    await asyncio.wait_for(cleanup_finished.wait(), 1.0)
+
+
+async def test_cleanup_error_does_not_replace_the_grade_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = Environment("sums")
+
+    @env.template()
+    async def add(a: int, b: int):
+        yield f"add:{a}:{b}"
+        yield 1.0
+
+    @asynccontextmanager
+    async def provider(_task: TaskRow) -> AsyncIterator[Runtime]:
+        try:
+            async with _local(env) as runtime:
+                yield runtime
+        finally:
+            raise RuntimeError("cleanup exploded")
+
+    async def reset_during_grade(
+        self: HudClient,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        raise ConnectionResetError("peer closed before grade reply")
+
+    monkeypatch.setattr(HudClient, "grade", reset_during_grade)
+
+    run = await rollout(
+        _add_task(2, 3),
+        _FnAgent(_solve_add),
+        runtime=provider,
+    )
+
+    errors = [step.error for step in run.trace.steps if step.error]
+    assert any("[grading] ConnectionResetError" in error for error in errors)
+    assert any("[cleanup] RuntimeError: cleanup exploded" in error for error in errors)
 
 
 async def test_pre_launch_failure_yields_a_synthesized_failed_run() -> None:
