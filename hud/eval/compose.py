@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import contextlib
+import json
 import shlex
-from collections.abc import Awaitable, Callable
+import tarfile
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
-DockerCommand = Callable[..., Awaitable[tuple[str, str]]]
-
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Iterator, Mapping
 
 
 class ImageConfig(BaseModel):
@@ -27,28 +31,58 @@ class ImageConfig(BaseModel):
     exposed_ports: dict[str, Any] = Field(default_factory=dict, alias="ExposedPorts")
 
     @classmethod
-    async def inspect(cls, image: str, docker: DockerCommand) -> ImageConfig:
-        output, _ = await docker("image", "inspect", "--format", "{{json .Config}}", image)
-        return cls.model_validate_json(output)
+    def from_dockerfile(cls, path: Path) -> ImageConfig:
+        """Read final-stage image defaults needed before a remote build."""
+        logical: list[str] = []
+        pending = ""
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            pending = f"{pending} {line}".strip()
+            if pending.endswith("\\"):
+                pending = pending[:-1].rstrip()
+                continue
+            logical.append(pending)
+            pending = ""
+        if pending:
+            logical.append(pending)
 
-    @classmethod
-    async def inspect_registry(
-        cls,
-        image: str,
-        docker: DockerCommand,
-        *,
-        platform: str = "linux/amd64",
-    ) -> ImageConfig:
-        template = f'{{{{json (index .Image "{platform}").Config}}}}'
-        output, _ = await docker(
-            "buildx",
-            "imagetools",
-            "inspect",
-            "--format",
-            template,
-            image,
-        )
-        return cls.model_validate_json(output)
+        values: dict[str, Any] = {"Env": [], "ExposedPorts": {}}
+        environment: dict[str, str] = {}
+        for line in logical:
+            instruction, separator, value = line.partition(" ")
+            if not separator:
+                continue
+            instruction = instruction.upper()
+            value = value.strip()
+            if instruction == "FROM":
+                values = {"Env": [], "ExposedPorts": {}}
+                environment = {}
+            elif instruction == "USER":
+                values["User"] = value
+            elif instruction == "WORKDIR":
+                values["WorkingDir"] = value
+            elif instruction == "ENV":
+                tokens = shlex.split(value)
+                if not tokens or any("=" not in token for token in tokens):
+                    raise ValueError(f"remote adaptation requires ENV key=value in {path}")
+                for token in tokens:
+                    key, _, item = token.partition("=")
+                    environment[key] = item
+                values["Env"] = [f"{key}={item}" for key, item in environment.items()]
+            elif instruction in {"ENTRYPOINT", "CMD"}:
+                command = json.loads(value) if value.startswith("[") else ["/bin/sh", "-c", value]
+                if not isinstance(command, list) or not all(
+                    isinstance(item, str) for item in command
+                ):
+                    raise ValueError(f"invalid {instruction} in {path}")
+                values["Entrypoint" if instruction == "ENTRYPOINT" else "Cmd"] = command
+            elif instruction == "EXPOSE":
+                values["ExposedPorts"] = {
+                    port if "/" in port else f"{port}/tcp": {} for port in shlex.split(value)
+                }
+        return cls.model_validate(values)
 
 
 class ComposeHealthcheck(BaseModel):
@@ -127,46 +161,148 @@ class ComposeConfig(BaseModel):
     networks: dict[str, dict[str, Any] | None] = Field(default_factory=dict)
 
     @classmethod
-    async def load(
-        cls,
-        *files: Path,
-        docker: DockerCommand,
-        project_directory: Path | None = None,
-        project_name: str | None = None,
-    ) -> ComposeConfig:
-        if not files:
-            raise ValueError("ComposeConfig.load requires at least one file")
-        command = ["compose"]
-        if project_name is not None:
-            command.extend(("--project-name", project_name))
-        if project_directory is not None:
-            command.extend(("--project-directory", str(project_directory)))
-        for file in files:
-            command.extend(("--file", str(file)))
-        output, _ = await docker(*command, "config", "--format", "json")
-        return cls.model_validate_json(output)
+    def from_file(cls, path: Path) -> ComposeConfig:
+        """Load a self-contained authored Compose document without Docker."""
+        source = path.read_text(encoding="utf-8")
+        if "${" in source:
+            raise ValueError("remote adaptation does not support Compose interpolation")
+        raw = yaml.safe_load(source)
+        if not isinstance(raw, dict):
+            raise ValueError(f"{path.name} is not a Compose document")
+        document = raw
+        if any(field in document for field in ("include", "extends")):
+            raise ValueError("remote adaptation does not support Compose includes")
+        services = document.get("services")
+        if isinstance(services, dict):
+            for raw_service in services.values():
+                if isinstance(raw_service, dict) and isinstance(raw_service.get("expose"), list):
+                    raw_service["expose"] = [str(port) for port in raw_service["expose"]]
+        return cls.model_validate(document)
 
-    async def resolve_registry_images(
+
+class ComposeProjectRef(BaseModel):
+    """Platform reference to a Compose file within an uploaded project."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    compose_path: str
+
+
+@dataclass(frozen=True, slots=True)
+class ComposeSource:
+    """One authored or platform-wire Compose runtime source."""
+
+    document: Path | ComposeConfig
+    project: Path | ComposeProjectRef | None = None
+
+    def request_payload(self) -> dict[str, Any]:
+        if isinstance(self.document, Path):
+            document = ComposeConfig.from_file(self.document)
+        else:
+            document = self.document
+        payload: dict[str, Any] = {
+            "compose": document.model_dump(mode="json", exclude_none=True),
+        }
+        if isinstance(self.project, Path):
+            if not isinstance(self.document, Path):
+                raise ValueError("compose_project as a path requires compose as a path")
+            try:
+                compose_path = (
+                    self.document.resolve().relative_to(self.project.resolve()).as_posix()
+                )
+            except ValueError:
+                raise ValueError("runtime_config.compose must be inside compose_project") from None
+            payload["compose_project"] = {"compose_path": compose_path}
+        elif self.project is not None:
+            payload["compose_project"] = self.project.model_dump(mode="json")
+        return payload
+
+    def runnable_path(self, provider: str) -> Path:
+        if not isinstance(self.document, Path):
+            raise ValueError(f"{provider} requires runtime_config.compose as a local file path")
+        return self.document.resolve()
+
+
+@dataclass(frozen=True, slots=True)
+class ComposeLaunchFiles:
+    compose: Path
+    override: Path
+    ports: Path
+    archive: Path | None
+
+
+@dataclass(frozen=True, slots=True)
+class ComposeProject:
+    """A local Compose project staged with HUD's main-service overrides."""
+
+    compose: Path
+
+    @contextlib.contextmanager
+    def stage(
         self,
-        docker: DockerCommand,
+        published_port: str,
         *,
-        platform: str = "linux/amd64",
-    ) -> ComposeConfig:
-        images: dict[str, ImageConfig] = {}
-        services: dict[str, ComposeService] = {}
-        for name, service in self.services.items():
-            if service.image is None:
-                raise ValueError(f"Compose service {name!r} requires an image")
-            if service.entrypoint is None or service.command is None or service.working_dir is None:
-                if service.image not in images:
-                    images[service.image] = await ImageConfig.inspect_registry(
-                        service.image,
-                        docker,
-                        platform=platform,
-                    )
-                service = service.with_image(service.image, images[service.image])
-            services[name] = service
-        return self.model_copy(update={"services": services})
+        seccomp: str | Path,
+        service_socket: str | None = None,
+        env_vars: Mapping[str, str] | None = None,
+        cpu: float | None = None,
+        memory_mb: int | None = None,
+        gpu_count: int | None = None,
+        archive: bool = False,
+    ) -> Iterator[ComposeLaunchFiles]:
+        main: dict[str, Any] = {
+            "security_opt": [f"seccomp={seccomp}", "systempaths=unconfined"],
+        }
+        if service_socket is not None:
+            main["volumes"] = [
+                {
+                    "type": "bind",
+                    "source": service_socket,
+                    "target": "/media/hud/docker.sock",
+                }
+            ]
+        if env_vars:
+            main["environment"] = dict(env_vars)
+        if cpu is not None:
+            main["cpus"] = cpu
+        if memory_mb is not None:
+            main["mem_limit"] = f"{memory_mb}m"
+        if gpu_count is not None:
+            main["gpus"] = gpu_count
+
+        with tempfile.TemporaryDirectory(prefix="hud-compose-") as directory:
+            root = Path(directory)
+            override = root / "override.json"
+            override.write_text(
+                json.dumps({"services": {"main": main}}),
+                encoding="utf-8",
+            )
+            ports = root / "ports.yaml"
+            ports.write_text(
+                f'services:\n  main:\n    ports: !override ["{published_port}"]\n',
+                encoding="utf-8",
+            )
+            archive_path = None
+            if archive:
+                archive_path = root / "project.tar.gz"
+                with tarfile.open(archive_path, "w:gz") as tar:
+                    for entry in self.compose.parent.iterdir():
+                        tar.add(entry, arcname=entry.name)
+            yield ComposeLaunchFiles(
+                compose=self.compose,
+                override=override,
+                ports=ports,
+                archive=archive_path,
+            )
 
 
-__all__ = ["ComposeConfig", "ComposeHealthcheck", "ComposePort", "ComposeService", "ImageConfig"]
+__all__ = [
+    "ComposeConfig",
+    "ComposeHealthcheck",
+    "ComposePort",
+    "ComposeProject",
+    "ComposeProjectRef",
+    "ComposeService",
+    "ComposeSource",
+    "ImageConfig",
+]
