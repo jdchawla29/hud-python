@@ -41,7 +41,6 @@ from .file_tracking import file_tracking_observer
 from .job import job_enter, trace_enter, trace_exit
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
     from types import TracebackType
 
     from hud.agents.base import Agent
@@ -51,56 +50,6 @@ if TYPE_CHECKING:
     from .task import Task
 
 logger = logging.getLogger("hud.eval.run")
-_CONTROL_KEEPALIVE_INTERVAL_SECONDS = 30.0
-_CONTROL_KEEPALIVE_DRAIN_TIMEOUT_SECONDS = 2.0
-
-
-@contextlib.asynccontextmanager
-async def _keep_control_session_alive(
-    client: HudClient,
-    *,
-    enabled: bool,
-) -> AsyncIterator[None]:
-    if not enabled:
-        yield
-        return
-
-    stop = asyncio.Event()
-
-    async def pulse() -> None:
-        while not stop.is_set():
-            try:
-                await asyncio.wait_for(
-                    stop.wait(),
-                    timeout=_CONTROL_KEEPALIVE_INTERVAL_SECONDS,
-                )
-            except TimeoutError:
-                try:
-                    await client.keepalive()
-                except Exception as exc:
-                    logger.warning("control session keepalive failed: %s", exc)
-                    return
-
-    task = asyncio.create_task(pulse())
-    try:
-        yield
-    finally:
-        stop.set()
-        try:
-            await asyncio.wait_for(
-                asyncio.shield(task),
-                timeout=_CONTROL_KEEPALIVE_DRAIN_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            logger.warning("control session keepalive timed out; aborting transport")
-            client.abort()
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        except asyncio.CancelledError:
-            client.abort()
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            raise
 
 
 def _prompt_message(item: Any) -> mcp_types.PromptMessage:
@@ -433,13 +382,7 @@ async def rollout(
                     async with live:  # start on enter; grade on exit
                         run = live  # bound only once live: an earlier failure synthesizes
                         _phase = "agent loop"
-                        async with (
-                            _keep_control_session_alive(
-                                client,
-                                enabled=addr.params.get("control_keepalive") is True,
-                            ),
-                            file_tracking_observer(client),
-                        ):
+                        async with file_tracking_observer(client):
                             await agent(run)
                         _phase = "grading"
                 except Exception as exc:

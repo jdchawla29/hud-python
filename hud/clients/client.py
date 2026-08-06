@@ -34,6 +34,8 @@ if TYPE_CHECKING:
     from hud.eval.runtime import Runtime
 
 LOGGER = logging.getLogger("hud.clients")
+_CONTROL_HEARTBEAT_INTERVAL_SECONDS = 30.0
+_CONTROL_HEARTBEAT_TIMEOUT_SECONDS = 5.0
 
 #: protocol -> CapabilityClient subclass, for ``HudClient.open``.
 _CLIENT_REGISTRY: dict[str, type[CapabilityClient]] = {
@@ -291,15 +293,6 @@ class HudClient:
         """Start a task; returns the first yield (``{"prompt": ...}``)."""
         return await self._call("tasks.start", {"id": task_id, "args": args or {}})
 
-    async def keepalive(self) -> None:
-        """Keep this session's control transport active without rebuilding bindings."""
-        if self.manifest is None:
-            raise RuntimeError("call hello() before keeping the session alive")
-        session_id = self.manifest.session_id
-        result = await self._call("hello", {"session_id": session_id})
-        if result.get("session_id") != session_id:
-            raise HudProtocolError(-32603, "hello: session changed during keepalive")
-
     async def grade(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Send ``tasks.grade``; returns the evaluation dict (``{"score": ...}``)."""
         return await self._call("tasks.grade", payload)
@@ -412,9 +405,30 @@ async def connect(runtime: Runtime, *, ready_timeout: float = 240.0) -> AsyncIte
         parts.port or 0,
         ready_timeout=_runtime_ready_timeout(runtime, ready_timeout),
     )
+
+    async def heartbeat() -> None:
+        while True:
+            await asyncio.sleep(_CONTROL_HEARTBEAT_INTERVAL_SECONDS)
+            assert client.manifest is not None
+            session_id = client.manifest.session_id
+            try:
+                result = await asyncio.wait_for(
+                    client._call("hello", {"session_id": session_id}),
+                    timeout=_CONTROL_HEARTBEAT_TIMEOUT_SECONDS,
+                )
+                if result.get("session_id") != session_id:
+                    raise HudProtocolError(-32603, "hello: session changed during heartbeat")
+            except Exception as exc:
+                LOGGER.warning("control heartbeat failed: %s", exc)
+                client.abort()
+                return
+
+    heartbeat_task = asyncio.create_task(heartbeat(), name="hud-control-heartbeat")
     try:
         yield client
     finally:
+        heartbeat_task.cancel()
+        await asyncio.gather(heartbeat_task, return_exceptions=True)
         await client.close()
 
 

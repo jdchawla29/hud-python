@@ -54,35 +54,54 @@ async def test_connect_retries_through_accept_then_eof_until_the_env_serves() ->
     assert attempts == 3
 
 
-async def test_keepalive_reuses_the_live_session_without_rebuilding_bindings() -> None:
+async def test_connect_keeps_the_control_session_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     requests: list[dict[str, object]] = []
+    heartbeat_received = asyncio.Event()
+    release_heartbeat = asyncio.Event()
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
-            for _ in range(2):
+            while True:
                 msg = await read_frame(reader)
-                assert msg is not None
+                if msg is None:
+                    return
                 requests.append(msg)
-                await send_frame(
-                    writer,
-                    {"jsonrpc": "2.0", "id": msg["id"], "result": HELLO_RESULT},
-                )
-            await read_frame(reader)
+                if msg["method"] == "hello":
+                    if len(requests) > 1:
+                        heartbeat_received.set()
+                        await release_heartbeat.wait()
+                    await send_frame(
+                        writer,
+                        {"jsonrpc": "2.0", "id": msg["id"], "result": HELLO_RESULT},
+                    )
+                elif msg["method"] == "tasks.grade":
+                    await send_frame(
+                        writer,
+                        {"jsonrpc": "2.0", "id": msg["id"], "result": {"score": 1.0}},
+                    )
         finally:
             writer.close()
 
+    monkeypatch.setattr(client_module, "_CONTROL_HEARTBEAT_INTERVAL_SECONDS", 0.01)
     server = await asyncio.start_server(handler, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
     try:
         async with connect(Runtime(f"tcp://127.0.0.1:{port}")) as client:
-            manifest = client.manifest
-            await client.keepalive()
-            assert client.manifest is manifest
+            await asyncio.wait_for(heartbeat_received.wait(), 1.0)
+            grade = asyncio.create_task(client.grade({"answer": "done"}))
+            await asyncio.sleep(0)
+            release_heartbeat.set()
+            assert await asyncio.wait_for(grade, 1.0) == {"score": 1.0}
     finally:
         server.close()
         await server.wait_closed()
 
-    assert [request["method"] for request in requests] == ["hello", "hello"]
+    methods = [request["method"] for request in requests]
+    grade_index = methods.index("tasks.grade")
+    assert methods[0] == "hello"
+    assert all(method == "hello" for method in methods[1:grade_index])
     assert requests[1]["params"] == {"session_id": "s-1"}
 
 

@@ -591,11 +591,7 @@ async def test_modal_runtime_config_flows_into_modal_sdk(
 
     async with provider(_row()) as runtime:
         assert runtime.url == "tcp://modal.host:4567"
-        assert runtime.params == {
-            "provider": "modal",
-            "instance_id": "sb-1",
-            "control_keepalive": True,
-        }
+        assert runtime.params == {"provider": "modal", "instance_id": "sb-1"}
         assert runtime.config == config
 
     assert calls["registry_image"] == "img:tag"
