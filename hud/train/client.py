@@ -11,9 +11,10 @@ string (the service resolves recorded tokens + reward) or a :class:`hud.Run`
 
 from __future__ import annotations
 
+import importlib
 import logging
 from collections import Counter
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from hud.agents.types import AgentStep
 from hud.train.base import BaseTrainingClient
@@ -34,15 +35,13 @@ from hud.train.types import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    import torch
-
     from hud.eval.run import Run
 
     # A custom loss over a forward pass: given the per-datum tensors and the
     # current-policy logprobs as differentiable leaves, return (loss, metrics).
     CustomLossFn = Callable[
-        [list[DatumTensors], list["torch.Tensor"]],
-        tuple["torch.Tensor", dict[str, float]],
+        [list[DatumTensors], list[Any]],
+        tuple[Any, dict[str, float]],
     ]
 
 logger = logging.getLogger("hud.train.client")
@@ -234,7 +233,7 @@ class TrainingClient(BaseTrainingClient):
         torch (``pip install 'hud[train]'``).
         """
         try:
-            import torch
+            torch: Any = importlib.import_module("torch")
         except ImportError as exc:
             raise ImportError(
                 "forward_backward_custom requires torch; install 'hud[train]'"
