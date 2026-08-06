@@ -771,11 +771,11 @@ async def _run_evaluation(cfg: EvalConfig) -> Any:
     from hud.eval import Taskset
 
     source_path = Path(cfg.source)
-    is_local = source_path.exists()
+    is_local = await asyncio.to_thread(source_path.exists)
     if is_local:
         hud_console.info(f"Loading tasks from: {cfg.source}")
         try:
-            taskset = Taskset.from_file(source_path)
+            taskset = await asyncio.to_thread(Taskset.from_file, source_path)
         except Exception as e:
             hud_console.error(f"Failed to load tasks from {cfg.source}: {e}")
             raise typer.Exit(1) from e

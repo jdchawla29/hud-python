@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shlex
 import shutil
@@ -64,11 +65,11 @@ async def export(
     authored environment and Dockerfile. Each task becomes one self-contained
     Harbor task folder.
     """
-    src = Path(source).resolve()
+    src = await asyncio.to_thread(Path(source).resolve)
     source_dir = src.parent if src.is_file() else src
-    out = Path(out_dir).resolve()
-    out.mkdir(parents=True, exist_ok=True)
-    tasks = list(Taskset.from_file(src))
+    out = await asyncio.to_thread(Path(out_dir).resolve)
+    await asyncio.to_thread(out.mkdir, parents=True, exist_ok=True)
+    tasks = await asyncio.to_thread(lambda: list(Taskset.from_file(src)))
 
     scan = source_dir if src.suffix in (".json", ".jsonl") else src
     authored = {
