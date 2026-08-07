@@ -799,7 +799,8 @@ async def test_modal_runtime_runs_compose_inside_a_dind_vm(
     compose.write_text("services:\n  main:\n    image: hud-env:one\n", encoding="utf-8")
 
     async with ModalRuntime(
-        runtime_config=RuntimeConfig(compose=compose, compose_service_access=True)
+        runtime_config=RuntimeConfig(compose=compose, compose_service_access=True),
+        env_vars={"HUD_API_KEY": "secret"},
     )(_row()) as runtime:
         assert runtime.url == "tcp://modal.host:4567"
 
@@ -808,6 +809,9 @@ async def test_modal_runtime_runs_compose_inside_a_dind_vm(
     assert isinstance(kwargs, dict)
     assert kwargs["experimental_options"] == {"vm_runtime": True}
     assert kwargs["readiness_probe"] is None
+    assert kwargs["cpu"] == 4
+    assert kwargs["memory"] == 8192
+    assert kwargs["image"] == _ModalImageRef("registry", "docker:28.3.3-dind")
     assert calls["uploads"] == [
         ("project.tar.gz", "/hud/project.tar.gz"),
         ("override.json", "/hud/override.json"),
@@ -823,6 +827,7 @@ async def test_modal_runtime_runs_compose_inside_a_dind_vm(
             "target": "/media/hud/docker.sock",
         }
     ]
+    assert override["services"]["main"]["environment"] == {"HUD_API_KEY": "secret"}
     execs = calls["execs"]
     assert isinstance(execs, list)
     assert "docker compose" in execs[0][0][-1]

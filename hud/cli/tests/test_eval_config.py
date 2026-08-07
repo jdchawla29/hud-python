@@ -130,7 +130,7 @@ def test_resolve_placement_runtime_hud_uses_tunnel(
 
     monkeypatch.setattr(settings, "api_key", "sk-hud-test")
 
-    placement = eval_mod._resolve_placement(EvalConfig(runtime="hud"), tmp_path)
+    placement = eval_mod._resolve_placement(EvalConfig(runtime="hud"), tmp_path, [])
 
     assert isinstance(placement, HUDRuntime)
 
@@ -144,7 +144,7 @@ def test_resolve_placement_remote_uses_hosted_runtime(
 
     monkeypatch.setattr(settings, "api_key", "sk-hud-test")
 
-    placement = eval_mod._resolve_placement(EvalConfig(remote=True), tmp_path)
+    placement = eval_mod._resolve_placement(EvalConfig(remote=True), tmp_path, [])
 
     assert isinstance(placement, HostedRuntime)
 
