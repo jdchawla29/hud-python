@@ -16,7 +16,7 @@ import math
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 from hud.capabilities import (
@@ -74,6 +74,7 @@ class Manifest:
     session_id: str
     protocol_version: str  # e.g. "hud/1.0"
     server_info: ServerInfo
+    isolation: Literal["bwrap", "none"]
     bindings: list[Capability]
 
 
@@ -157,6 +158,7 @@ class HudClient:
                 name=env["name"],
                 version=env["version"],
             ),
+            isolation=result["isolation"],
             bindings=bindings,
         )
         self._routes.clear()

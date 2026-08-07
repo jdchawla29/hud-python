@@ -11,7 +11,7 @@ import contextlib
 import functools
 import inspect
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, Generic, ParamSpec, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, Protocol, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, create_model
 
@@ -145,6 +145,7 @@ class Environment:
     ) -> None:
         self.name = name
         self.version = version
+        self.isolation: Literal["bwrap", "none"] = "none"
         #: Published capabilities — always concrete wire data. Daemons the env
         #: runs itself publish theirs at serve time (:meth:`add_capability`
         #: from an ``@env.initialize`` hook; :meth:`workspace` wires the
@@ -286,6 +287,7 @@ class Environment:
 
             track_files = settings.file_tracking_enabled
         ws = Workspace(root, track_files=track_files, **kwargs)
+        self.isolation = "bwrap" if ws.bwrap_available else "none"
 
         @self.initialize
         async def _up() -> None:

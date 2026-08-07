@@ -342,6 +342,7 @@ class _ControlChannel:
                             {
                                 "session_id": session_id,
                                 "env": {"name": env.name, "version": env.version},
+                                "isolation": env.isolation,
                                 "bindings": bindings,
                             },
                         )

@@ -18,7 +18,12 @@ from hud.clients import connect
 from hud.environment.utils import read_frame, send_frame
 from hud.eval.runtime import Runtime
 
-HELLO_RESULT = {"session_id": "s-1", "env": {"name": "stub", "version": "1.0"}, "bindings": []}
+HELLO_RESULT = {
+    "session_id": "s-1",
+    "env": {"name": "stub", "version": "1.0"},
+    "isolation": "none",
+    "bindings": [],
+}
 
 
 async def test_connect_retries_through_accept_then_eof_until_the_env_serves() -> None:
@@ -47,6 +52,7 @@ async def test_connect_retries_through_accept_then_eof_until_the_env_serves() ->
         async with connect(Runtime(f"tcp://127.0.0.1:{port}"), ready_timeout=10) as client:
             assert client.manifest is not None
             assert client.manifest.server_info.name == "stub"
+            assert client.manifest.isolation == "none"
     finally:
         server.close()
         await server.wait_closed()
