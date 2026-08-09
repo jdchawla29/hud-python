@@ -484,22 +484,23 @@ def _inspect_task(task_dir: Path) -> tuple[HarborTask | None, tuple[AdaptFinding
                 )
             )
 
-        if config.verifier.separate and not (task_dir / "tests" / "Dockerfile").is_file():
-            findings.append(
-                _finding(
-                    "harbor.invalid.missing_verifier_dockerfile",
-                    "invalid",
-                    "separate verifier requires tests/Dockerfile",
+        if not config.steps:
+            if config.verifier.separate and not (task_dir / "tests" / "Dockerfile").is_file():
+                findings.append(
+                    _finding(
+                        "harbor.invalid.missing_verifier_dockerfile",
+                        "invalid",
+                        "separate verifier requires tests/Dockerfile",
+                    )
                 )
-            )
-        elif not (task_dir / "tests").is_dir():
-            findings.append(
-                _finding(
-                    "harbor.invalid.missing_tests",
-                    "invalid",
-                    "task requires a tests directory",
+            elif not (task_dir / "tests").is_dir():
+                findings.append(
+                    _finding(
+                        "harbor.invalid.missing_tests",
+                        "invalid",
+                        "task requires a tests directory",
+                    )
                 )
-            )
 
         if compose is not None:
             if {"hud-base", "hud-verifier"} & compose.services.keys():
@@ -601,7 +602,7 @@ def _inspect_task(task_dir: Path) -> tuple[HarborTask | None, tuple[AdaptFinding
                 )
 
     instruction = task_dir / "instruction.md"
-    if not instruction.is_file():
+    if not config.steps and not instruction.is_file():
         findings.append(
             _finding(
                 "harbor.invalid.missing_instruction",

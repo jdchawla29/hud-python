@@ -1035,11 +1035,7 @@ def test_multi_step_tasks_are_refused_directly(tmp_path: Path) -> None:
 
     failure = _failure(tmp_path)
 
-    assert {finding.code for finding in failure.findings} == {
-        "harbor.unsupported.multi_step",
-        "harbor.invalid.missing_instruction",
-        "harbor.invalid.missing_tests",
-    }
+    assert [finding.code for finding in failure.findings] == ["harbor.unsupported.multi_step"]
 
 
 def test_invalid_task_config_is_not_silently_defaulted(
