@@ -508,6 +508,20 @@ def test_adapt_requires_peer_port_in_the_compose_project(
     assert [finding.code for finding in failure.findings] == ["harbor.invalid.sidecar_port"]
 
 
+def test_adapt_rejects_compose_paths_outside_the_task_package(tmp_path: Path) -> None:
+    task = make_harbor_task(tmp_path, "task-a")
+    (task / "environment" / "compose.yaml").write_text(
+        "services:\n  main:\n    volumes: ['../../../shared:/data']\n",
+        encoding="utf-8",
+    )
+
+    failure = _failure(tmp_path)
+
+    assert [finding.code for finding in failure.findings] == [
+        "harbor.invalid.compose_project_path"
+    ]
+
+
 def test_adapt_rejects_sidecar_without_a_tcp_port(
     tmp_path: Path,
 ) -> None:

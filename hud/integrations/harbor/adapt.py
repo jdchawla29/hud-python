@@ -424,6 +424,12 @@ def _inspect_task(task_dir: Path) -> tuple[HarborTask | None, tuple[AdaptFinding
             compose = None
         else:
             compose.name = None
+            try:
+                compose.with_project_directory("./environment")
+            except ValueError as error:
+                findings.append(
+                    _finding("harbor.invalid.compose_project_path", "invalid", str(error))
+                )
 
     if authored_compose is None or compose is not None:
         compose_main = compose.services["main"] if compose is not None else ComposeService()
