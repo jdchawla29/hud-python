@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, cast
 import pytest
 
 from hud.agents.base import Agent
-from hud.eval import DockerRuntime, Shared
+from hud.eval import DockerRuntime, Shared, Taskset
 from hud.integrations import harbor
 
 if TYPE_CHECKING:
@@ -31,6 +31,12 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(sys.platform == "win32", reason="adapted images are Linux containers"),
 ]
+
+
+def _adapt(path: Path, *, hud_requirement: str = "hud") -> Taskset:
+    result = harbor.adapt(path, hud_requirement=hud_requirement)
+    assert result.failures == ()
+    return result.taskset
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -149,7 +155,7 @@ async def _grade_every_task(dataset: Path, wheel: Path) -> dict[str, Run]:
         }
 
     solutions = await asyncio.to_thread(load_solutions)
-    taskset = harbor.adapt(dataset, hud_requirement=str(wheel))
+    taskset = _adapt(dataset, hud_requirement=str(wheel))
     job = await taskset.run(
         Oracle(solutions),
         runtime=DockerRuntime(),
@@ -295,7 +301,7 @@ timeout_sec = 30
     (task / "solution" / "solve.sh").write_text("true\n", encoding="utf-8")
 
     async def grade_twice() -> list[Run]:
-        taskset = harbor.adapt(dataset, hud_requirement=str(wheel))
+        taskset = _adapt(dataset, hud_requirement=str(wheel))
         job = await taskset.run(
             Oracle({"sidecar-reachability": "true"}),
             runtime=Shared(DockerRuntime(), width=1),

@@ -37,6 +37,7 @@ IGNORED = shutil.ignore_patterns(
 )
 NetworkMode = Literal["public", "no-network", "allowlist"]
 MCPTransport = Literal["sse", "streamable-http", "stdio"]
+FindingKind = Literal["contract", "invalid"]
 COMPOSE_FILENAMES = (
     "compose.yaml",
     "compose.yml",
@@ -189,6 +190,30 @@ class TaskConfig(BaseModel):
     steps: list[dict[str, Any]] | None = None
 
 
+class AdaptFinding(BaseModel):
+    """One independently detectable reason a Harbor task was not adapted."""
+
+    code: str
+    kind: FindingKind
+    message: str
+
+
+class AdaptFailure(BaseModel):
+    """All findings for one Harbor task."""
+
+    task: str
+    path: Path
+    findings: tuple[AdaptFinding, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AdaptResult:
+    """Successful task rows and structured failures from one adaptation."""
+
+    taskset: Taskset
+    failures: tuple[AdaptFailure, ...]
+
+
 @dataclass(frozen=True, slots=True)
 class HarborTask:
     path: Path
@@ -209,11 +234,401 @@ def _tree_hash(root: Path) -> str:
     return digest.hexdigest()[:16]
 
 
+def _dockerfile_stages(source: str) -> tuple[list[str], list[tuple[int, re.Match[str]]]]:
+    lines = source.splitlines(keepends=True)
+    pattern = re.compile(
+        r"^(?P<from>\s*FROM\s+(?:--platform=\S+\s+)?\S+)"
+        r"(?P<alias>\s+AS\s+(?P<name>[A-Za-z0-9_.-]+))?"
+        r"(?P<suffix>\s*(?:#.*)?)$",
+        re.IGNORECASE,
+    )
+    stages: list[tuple[int, re.Match[str]]] = []
+    for index, raw_line in enumerate(lines):
+        line = raw_line.rstrip("\r\n")
+        if not re.match(r"^\s*FROM\b", line, re.IGNORECASE):
+            continue
+        match = pattern.fullmatch(line)
+        if match is None:
+            raise ValueError(
+                "environment/Dockerfile has an unsupported multi-line FROM instruction"
+            )
+        stages.append((index, match))
+    if not stages:
+        raise ValueError("environment/Dockerfile has no FROM stage")
+    return lines, stages
+
+
+def _finding(code: str, kind: FindingKind, message: str) -> AdaptFinding:
+    return AdaptFinding(code=code, kind=kind, message=message)
+
+
+def _inspect_task(task_dir: Path) -> tuple[HarborTask | None, tuple[AdaptFinding, ...]]:
+    findings: list[AdaptFinding] = []
+    try:
+        raw_config = tomllib.loads((task_dir / "task.toml").read_text("utf-8"))
+    except OSError as error:
+        return None, (_finding("harbor.invalid.task_config_io", "invalid", str(error)),)
+    except tomllib.TOMLDecodeError as error:
+        return None, (_finding("harbor.invalid.task_config_toml", "invalid", str(error)),)
+
+    try:
+        config = TaskConfig.model_validate(raw_config)
+    except ValidationError as error:
+        return None, tuple(
+            _finding(
+                "harbor.invalid.task_config",
+                "invalid",
+                f"{'.'.join(str(part) for part in detail['loc'])}: {detail['msg']}",
+            )
+            for detail in error.errors(include_url=False)
+        )
+
+    environment = config.environment
+    if environment.os != "linux":
+        findings.append(
+            _finding(
+                "harbor.unsupported.os",
+                "contract",
+                f"environment OS {environment.os!r} is not supported",
+            )
+        )
+    if environment.tpu:
+        findings.append(_finding("harbor.unsupported.tpu", "contract", "TPUs are not supported"))
+    if len(environment.gpu_types) > 1:
+        findings.append(
+            _finding(
+                "harbor.unsupported.multiple_gpu_types",
+                "contract",
+                "multiple GPU types are not supported",
+            )
+        )
+    elif environment.gpu_types and not environment.gpus:
+        findings.append(
+            _finding(
+                "harbor.invalid.gpu_type_without_gpu",
+                "invalid",
+                "GPU types require a positive GPU count",
+            )
+        )
+    if any(server.transport == "stdio" for server in environment.mcp_servers):
+        findings.append(
+            _finding(
+                "harbor.unsupported.mcp_stdio",
+                "contract",
+                "stdio MCP servers are not supported",
+            )
+        )
+    if environment.skills_dir:
+        findings.append(
+            _finding(
+                "harbor.unsupported.skills_dir",
+                "contract",
+                "per-task agent skills are not supported",
+            )
+        )
+
+    verifier_environment = config.verifier.environment
+    if verifier_environment is not None:
+        if verifier_environment.os != "linux":
+            findings.append(
+                _finding(
+                    "harbor.unsupported.verifier_os",
+                    "contract",
+                    f"verifier OS {verifier_environment.os!r} is not supported",
+                )
+            )
+        if verifier_environment.tpu:
+            findings.append(
+                _finding(
+                    "harbor.unsupported.verifier_tpu",
+                    "contract",
+                    "verifier TPUs are not supported",
+                )
+            )
+        if len(verifier_environment.gpu_types) > 1:
+            findings.append(
+                _finding(
+                    "harbor.unsupported.multiple_verifier_gpu_types",
+                    "contract",
+                    "multiple verifier GPU types are not supported",
+                )
+            )
+        elif verifier_environment.gpu_types and not verifier_environment.gpus:
+            findings.append(
+                _finding(
+                    "harbor.invalid.verifier_gpu_type_without_gpu",
+                    "invalid",
+                    "verifier GPU types require a positive GPU count",
+                )
+            )
+        if len({*environment.gpu_types, *verifier_environment.gpu_types}) > 1:
+            findings.append(
+                _finding(
+                    "harbor.unsupported.distinct_phase_gpu_types",
+                    "contract",
+                    "agent and verifier require different GPU types",
+                )
+            )
+    if config.steps:
+        findings.append(
+            _finding(
+                "harbor.unsupported.multi_step",
+                "contract",
+                "multi-step tasks are not supported",
+            )
+        )
+
+    server_names = [server.name for server in environment.mcp_servers]
+    if len(server_names) != len(set(server_names)):
+        findings.append(
+            _finding(
+                "harbor.invalid.duplicate_mcp_name",
+                "invalid",
+                "MCP server names must be unique",
+            )
+        )
+    findings.extend(
+        _finding(
+            "harbor.invalid.reserved_mcp_name",
+            "invalid",
+            f"MCP server name {name!r} is reserved by the workspace",
+        )
+        for name in sorted({"shell", "filetracking"} & set(server_names))
+    )
+    findings.extend(
+        _finding(
+            "harbor.invalid.mcp_url",
+            "invalid",
+            f"MCP server {server.name!r} requires a URL",
+        )
+        for server in environment.mcp_servers
+        if server.transport != "stdio" and server.url is None
+    )
+
+    environment_dir = task_dir / "environment"
+    authored_compose = next(
+        (
+            environment_dir / filename
+            for filename in COMPOSE_FILENAMES
+            if (environment_dir / filename).is_file()
+        ),
+        None,
+    )
+    compose = None
+    if authored_compose is not None:
+        try:
+            compose = ComposeConfig.from_file(authored_compose)
+            compose.services["main"]
+        except (OSError, ValueError, ValidationError, KeyError) as error:
+            findings.append(_finding("harbor.invalid.compose", "invalid", str(error)))
+            compose = None
+        else:
+            compose.name = None
+
+    if authored_compose is None or compose is not None:
+        compose_main = compose.services["main"] if compose is not None else ComposeService()
+        dockerfile = environment_dir / "Dockerfile"
+        base_image = environment.docker_image or compose_main.image
+        if compose is not None:
+            build = compose_main.build
+            if build is not None:
+                build_config = {"context": build} if isinstance(build, str) else build
+                build_context = build_config.get("context", ".")
+                build_dockerfile = build_config.get("dockerfile", "Dockerfile")
+                if not isinstance(build_context, str) or not isinstance(build_dockerfile, str):
+                    findings.append(
+                        _finding(
+                            "harbor.invalid.compose_main_build_path",
+                            "invalid",
+                            "Compose main build paths must be strings",
+                        )
+                    )
+                else:
+                    dockerfile = (environment_dir / build_context / build_dockerfile).resolve()
+                    try:
+                        dockerfile.relative_to(environment_dir.resolve())
+                    except ValueError:
+                        findings.append(
+                            _finding(
+                                "harbor.invalid.compose_main_build_escape",
+                                "invalid",
+                                "Compose main build escapes environment",
+                            )
+                        )
+            if dockerfile.is_file():
+                base_image = f"hud-harbor-base:{_tree_hash(environment_dir)}"
+            elif build is not None:
+                findings.append(
+                    _finding(
+                        "harbor.invalid.missing_compose_main_dockerfile",
+                        "invalid",
+                        "Compose main Dockerfile does not exist",
+                    )
+                )
+            elif base_image is None:
+                findings.append(
+                    _finding(
+                        "harbor.invalid.compose_main_recipe",
+                        "invalid",
+                        "Compose main has neither image nor build",
+                    )
+                )
+        elif dockerfile.is_file():
+            base_image = f"hud-harbor-base:{_tree_hash(environment_dir)}"
+        elif base_image is None:
+            findings.append(
+                _finding(
+                    "harbor.invalid.environment_recipe",
+                    "invalid",
+                    "task has neither environment/Dockerfile nor docker_image",
+                )
+            )
+
+        if config.verifier.separate and not (task_dir / "tests" / "Dockerfile").is_file():
+            findings.append(
+                _finding(
+                    "harbor.invalid.missing_verifier_dockerfile",
+                    "invalid",
+                    "separate verifier requires tests/Dockerfile",
+                )
+            )
+        elif not (task_dir / "tests").is_dir():
+            findings.append(
+                _finding(
+                    "harbor.invalid.missing_tests",
+                    "invalid",
+                    "task requires a tests directory",
+                )
+            )
+
+        if compose is not None:
+            if {"hud-base", "hud-verifier"} & compose.services.keys():
+                findings.append(
+                    _finding(
+                        "harbor.invalid.reserved_compose_service",
+                        "invalid",
+                        "Compose service names 'hud-base' and 'hud-verifier' are reserved",
+                    )
+                )
+            for service_name, service in compose.services.items():
+                if service_name == "main":
+                    continue
+                if service.build is None and service.image is None:
+                    findings.append(
+                        _finding(
+                            "harbor.invalid.sidecar_recipe",
+                            "invalid",
+                            f"Compose service {service_name!r} has neither image nor build",
+                        )
+                    )
+                ports = {
+                    int(value)
+                    for exposed in service.expose
+                    if (value := str(exposed).partition("/")[0]).isdigit()
+                }
+                ports.update(
+                    published.target for published in service.ports if published.protocol == "tcp"
+                )
+                if len(ports) > 1:
+                    findings.append(
+                        _finding(
+                            "harbor.unsupported.multiple_sidecar_ports",
+                            "contract",
+                            f"Compose service {service_name!r} exposes multiple TCP ports",
+                        )
+                    )
+                elif not ports:
+                    findings.append(
+                        _finding(
+                            "harbor.invalid.sidecar_port",
+                            "invalid",
+                            f"Compose service {service_name!r} declares no TCP port",
+                        )
+                    )
+
+        workdir = environment.workdir or compose_main.working_dir
+        if workdir is not None and Path(workdir).is_relative_to(HUD_ROOT):
+            findings.append(
+                _finding(
+                    "harbor.invalid.reserved_workdir",
+                    "invalid",
+                    f"Harbor workdir {workdir!r} is inside reserved path {HUD_ROOT}",
+                )
+            )
+        main_ports = {
+            int(port)
+            for exposed in compose_main.expose
+            if (port := str(exposed).partition("/")[0]).isdigit()
+        }
+        main_ports.update(
+            published.target for published in compose_main.ports if published.protocol == "tcp"
+        )
+        findings.extend(
+            _finding(
+                "harbor.invalid.reserved_main_port",
+                "invalid",
+                f"Harbor main service port {port} conflicts with a HUD reserved port",
+            )
+            for port in sorted(main_ports & {BRIDGE_PORT, VISITOR_PORT, 8765})
+        )
+        if environment.healthcheck is None and compose_main.healthcheck is not None:
+            try:
+                HealthcheckConfig.from_compose(compose_main.healthcheck)
+            except ValueError as error:
+                findings.append(_finding("harbor.invalid.healthcheck", "invalid", str(error)))
+
+        if compose is None and dockerfile.is_file():
+            try:
+                _, stages = _dockerfile_stages(dockerfile.read_text("utf-8"))
+            except (OSError, UnicodeError, ValueError) as error:
+                findings.append(_finding("harbor.invalid.dockerfile", "invalid", str(error)))
+            else:
+                stage_names = {
+                    match.group("name").lower()
+                    for _, match in stages
+                    if match.group("name") is not None
+                }
+                reserved_names = {"hud-base", "hud-runtime"}
+                if config.verifier.separate:
+                    reserved_names.update({"hud-docker-cli", "hud-verifier", "hud-verifier-root"})
+                findings.extend(
+                    _finding(
+                        "harbor.invalid.reserved_dockerfile_stage",
+                        "invalid",
+                        f"environment/Dockerfile uses reserved stage {stage!r}",
+                    )
+                    for stage in sorted(reserved_names & stage_names)
+                )
+
+    instruction = task_dir / "instruction.md"
+    if not instruction.is_file():
+        findings.append(
+            _finding(
+                "harbor.invalid.missing_instruction",
+                "invalid",
+                f"{task_dir.name} has no instruction.md",
+            )
+        )
+    if findings:
+        return None, tuple(findings)
+
+    return (
+        HarborTask(
+            path=task_dir,
+            config=config,
+            instruction=instruction.read_text("utf-8"),
+            environment_hash=_tree_hash(environment_dir) if environment_dir.exists() else "missing",
+            compose=compose,
+        ),
+        (),
+    )
+
+
 def adapt(
     path: str | Path,
     *,
     hud_requirement: str = "hud",
-) -> Taskset:
+) -> AdaptResult:
     """Package Harbor tasks as buildable Compose projects."""
     root = Path(path).resolve()
     if (root / "task.toml").is_file():
@@ -228,95 +643,14 @@ def adapt(
     if not task_dirs:
         raise ValueError(f"no Harbor tasks found in {path}")
 
-    tasks = []
+    tasks: list[HarborTask] = []
+    failures: list[AdaptFailure] = []
     for task_dir in task_dirs:
-        try:
-            config = TaskConfig.model_validate(
-                tomllib.loads((task_dir / "task.toml").read_text("utf-8"))
-            )
-        except (OSError, tomllib.TOMLDecodeError, ValidationError) as error:
-            raise ValueError(
-                f"{task_dir.name}/task.toml is not a valid Harbor task: {error}"
-            ) from error
-        unsupported = []
-        if config.environment.os != "linux":
-            unsupported.append(f"os={config.environment.os!r}")
-        if config.environment.tpu:
-            unsupported.append("TPUs")
-        if len(config.environment.gpu_types) > 1:
-            unsupported.append("multiple GPU types")
-        elif config.environment.gpu_types and not config.environment.gpus:
-            unsupported.append("GPU types without GPUs")
-        if any(server.transport == "stdio" for server in config.environment.mcp_servers):
-            unsupported.append("stdio MCP servers")
-        if config.environment.skills_dir:
-            unsupported.append("skills_dir")
-        verifier_environment = config.verifier.environment
-        if verifier_environment is not None:
-            if verifier_environment.os != "linux":
-                unsupported.append(f"verifier os={verifier_environment.os!r}")
-            if verifier_environment.tpu:
-                unsupported.append("verifier TPUs")
-            if len(verifier_environment.gpu_types) > 1:
-                unsupported.append("multiple verifier GPU types")
-            elif verifier_environment.gpu_types and not verifier_environment.gpus:
-                unsupported.append("verifier GPU types without GPUs")
-            gpu_types = {
-                *config.environment.gpu_types,
-                *verifier_environment.gpu_types,
-            }
-            if len(gpu_types) > 1:
-                unsupported.append("different agent and verifier GPU types")
-        if config.steps:
-            unsupported.append("multi-step tasks")
-        if unsupported:
-            raise NotImplementedError(
-                f"Harbor task {task_dir.name!r} uses unsupported features: "
-                + ", ".join(unsupported)
-            )
-
-        server_names = [server.name for server in config.environment.mcp_servers]
-        if len(server_names) != len(set(server_names)):
-            raise ValueError("MCP server names must be unique")
-        if reserved := {"shell", "filetracking"} & set(server_names):
-            raise ValueError(f"MCP server name {min(reserved)!r} is reserved by the workspace")
-        for server in config.environment.mcp_servers:
-            if server.url is None:
-                raise ValueError(f"MCP server {server.name!r} requires a URL")
-
-        environment_dir = task_dir / "environment"
-        authored_compose = next(
-            (
-                environment_dir / filename
-                for filename in COMPOSE_FILENAMES
-                if (environment_dir / filename).is_file()
-            ),
-            None,
-        )
-        compose = None
-        if authored_compose is not None:
-            try:
-                compose = ComposeConfig.from_file(authored_compose)
-                compose.services["main"]
-            except (ValidationError, KeyError) as error:
-                raise ValueError(f"{task_dir.name} did not resolve to a Compose project") from error
-            compose.name = None
-
-        instruction = task_dir / "instruction.md"
-        if not instruction.is_file():
-            raise FileNotFoundError(f"{task_dir.name} has no instruction.md")
-
-        tasks.append(
-            HarborTask(
-                path=task_dir,
-                config=config,
-                instruction=instruction.read_text("utf-8"),
-                environment_hash=_tree_hash(environment_dir)
-                if environment_dir.exists()
-                else "missing",
-                compose=compose,
-            )
-        )
+        task, findings = _inspect_task(task_dir)
+        if task is not None:
+            tasks.append(task)
+        else:
+            failures.append(AdaptFailure(task=task_dir.name, path=task_dir, findings=findings))
 
     grouped: dict[tuple[str, str, str], list[HarborTask]] = {}
     for task in tasks:
@@ -559,27 +893,7 @@ def adapt(
                 else f"FROM {base_image} AS hud-base\n"
             )
 
-            lines = dockerfile_source.splitlines(keepends=True)
-            stages: list[tuple[int, re.Match[str]]] = []
-            from_pattern = re.compile(
-                r"^(?P<from>\s*FROM\s+(?:--platform=\S+\s+)?\S+)"
-                r"(?P<alias>\s+AS\s+(?P<name>[A-Za-z0-9_.-]+))?"
-                r"(?P<suffix>\s*(?:#.*)?)$",
-                re.IGNORECASE,
-            )
-            for index, raw_line in enumerate(lines):
-                line = raw_line.rstrip("\r\n")
-                if not re.match(r"^\s*FROM\b", line, re.IGNORECASE):
-                    continue
-                match = from_pattern.fullmatch(line)
-                if match is None:
-                    raise ValueError(
-                        f"{source.path.name} environment/Dockerfile has an unsupported "
-                        "multi-line FROM instruction"
-                    )
-                stages.append((index, match))
-            if not stages:
-                raise ValueError(f"{source.path.name} environment/Dockerfile has no FROM stage")
+            lines, stages = _dockerfile_stages(dockerfile_source)
             stage_names = {
                 match.group("name").lower()
                 for _, match in stages
@@ -885,4 +1199,7 @@ fi
         Taskset(dataset.name, group_rows).to_file(context / "tasks.json")
 
     LOGGER.info("adapted %d Harbor project(s)", len({task.env for task in rows}))
-    return Taskset(dataset.name, rows, origin=f"harbor:{dataset}")
+    return AdaptResult(
+        taskset=Taskset(dataset.name, rows, origin=f"harbor:{dataset}"),
+        failures=tuple(failures),
+    )

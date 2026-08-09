@@ -10,10 +10,23 @@ from typing import Any
 
 import pytest
 
-from hud.eval import Task
+from hud.eval import Task, Taskset
 from hud.integrations import harbor
 
 from .conftest import make_harbor_task, make_multi_step_task
+
+
+def _adapt(path: Path, *, hud_requirement: str = "hud") -> Taskset:
+    result = harbor.adapt(path, hud_requirement=hud_requirement)
+    assert result.failures == ()
+    return result.taskset
+
+
+def _failure(path: Path) -> harbor.AdaptFailure:
+    result = harbor.adapt(path)
+    assert list(result.taskset) == []
+    assert len(result.failures) == 1
+    return result.failures[0]
 
 
 def _tree_snapshot(root: Path) -> dict[str, tuple[str, bytes | str]]:
@@ -85,7 +98,7 @@ def test_adapt_packages_an_image_task_as_a_compose_project(tmp_path: Path) -> No
     task_dir = make_harbor_task(tmp_path, "task-a")
     authored_environment = _tree_snapshot(task_dir / "environment")
 
-    taskset = harbor.adapt(tmp_path)
+    taskset = _adapt(tmp_path)
 
     (task,) = list(taskset)
     assert task.id == "run"
@@ -158,7 +171,7 @@ def test_adapt_packages_an_image_task_as_a_compose_project(tmp_path: Path) -> No
 def test_task_content_changes_do_not_rebuild_the_environment(tmp_path: Path) -> None:
     task_dir = make_harbor_task(tmp_path, "task-a", instruction="First instruction")
 
-    (before,) = list(harbor.adapt(tmp_path))
+    (before,) = list(_adapt(tmp_path))
     assert before.runtime_config is not None
     assert isinstance(before.runtime_config.compose, Path)
     before_compose = json.loads(before.runtime_config.compose.read_text("utf-8"))
@@ -166,7 +179,7 @@ def test_task_content_changes_do_not_rebuild_the_environment(tmp_path: Path) -> 
 
     (task_dir / "instruction.md").write_text("Second instruction", encoding="utf-8")
     (task_dir / "tests" / "test.sh").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-    (after,) = list(harbor.adapt(tmp_path))
+    (after,) = list(_adapt(tmp_path))
     assert after.runtime_config is not None
     assert isinstance(after.runtime_config.compose, Path)
     after_compose = json.loads(after.runtime_config.compose.read_text("utf-8"))
@@ -182,7 +195,7 @@ def test_image_task_preserves_a_named_final_stage_verbatim(tmp_path: Path) -> No
     dockerfile = 'FROM alpine AS build\r\nRUN true\r\nFROM alpine AS final\r\nCMD ["sh"]\r\n'
     make_harbor_task(tmp_path, "task-a", dockerfile=dockerfile)
 
-    harbor.adapt(tmp_path)
+    _adapt(tmp_path)
 
     (context,) = (tmp_path / ".hud-adapt").iterdir()
     environment = context / "compose-project" / "environment"
@@ -198,8 +211,11 @@ def test_image_task_rejects_reserved_user_stage_names(
 ) -> None:
     make_harbor_task(tmp_path, "task-a", dockerfile=f"FROM alpine AS {stage}\n")
 
-    with pytest.raises(ValueError, match="reserved stage"):
-        harbor.adapt(tmp_path)
+    failure = _failure(tmp_path)
+
+    assert [finding.code for finding in failure.findings] == [
+        "harbor.invalid.reserved_dockerfile_stage"
+    ]
 
 
 def test_image_task_preserves_environment_ignored_paths_verbatim(
@@ -211,7 +227,7 @@ def test_image_task_preserves_environment_ignored_paths_verbatim(
     (environment / "ignored.txt").write_bytes(b"unchanged\x00payload")
     authored = _tree_snapshot(environment)
 
-    harbor.adapt(tmp_path)
+    _adapt(tmp_path)
 
     (context,) = (tmp_path / ".hud-adapt").iterdir()
     project = context / "compose-project"
@@ -240,7 +256,7 @@ services:
     )
     (environment / "Containerfile").write_text("FROM python:3.12\n", encoding="utf-8")
 
-    (row,) = list(harbor.adapt(tmp_path))
+    (row,) = list(_adapt(tmp_path))
 
     assert row.runtime_config is not None
     compose_path = row.runtime_config.compose
@@ -283,7 +299,7 @@ services:
         encoding="utf-8",
     )
 
-    (row,) = list(harbor.adapt(tmp_path))
+    (row,) = list(_adapt(tmp_path))
 
     assert row.runtime_config is not None
     assert row.runtime_config.image is None
@@ -376,7 +392,7 @@ services:
     (task / "environment" / "main.env").write_text("MAIN=true\n", encoding="utf-8")
     (task / "environment" / "main-data").mkdir()
 
-    (row,) = list(harbor.adapt(tmp_path))
+    (row,) = list(_adapt(tmp_path))
 
     assert row.runtime_config is not None
     compose_path = row.runtime_config.compose
@@ -411,7 +427,7 @@ services:
         encoding="utf-8",
     )
 
-    harbor.adapt(tmp_path)
+    _adapt(tmp_path)
 
     (context,) = (tmp_path / ".hud-adapt").iterdir()
     manifest = _environment_config(context)
@@ -441,7 +457,7 @@ services:
         encoding="utf-8",
     )
 
-    harbor.adapt(tmp_path)
+    _adapt(tmp_path)
 
     (context,) = (tmp_path / ".hud-adapt").iterdir()
     manifest = _environment_config(context)
@@ -464,7 +480,7 @@ def test_adapt_uses_compose_healthcheck_defaults(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    harbor.adapt(tmp_path)
+    _adapt(tmp_path)
 
     (context,) = (tmp_path / ".hud-adapt").iterdir()
     manifest = _environment_config(context)
@@ -487,8 +503,9 @@ def test_adapt_requires_peer_port_in_the_compose_project(
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="declares no TCP port"):
-        harbor.adapt(tmp_path)
+    failure = _failure(tmp_path)
+
+    assert [finding.code for finding in failure.findings] == ["harbor.invalid.sidecar_port"]
 
 
 def test_adapt_rejects_sidecar_without_a_tcp_port(
@@ -500,8 +517,9 @@ def test_adapt_rejects_sidecar_without_a_tcp_port(
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="declares no TCP port"):
-        harbor.adapt(tmp_path)
+    failure = _failure(tmp_path)
+
+    assert [finding.code for finding in failure.findings] == ["harbor.invalid.sidecar_port"]
 
 
 def test_network_mcp_servers_become_named_capabilities(
@@ -523,7 +541,7 @@ args = []
         encoding="utf-8",
     )
 
-    harbor.adapt(tmp_path)
+    _adapt(tmp_path)
 
     (context,) = (tmp_path / ".hud-adapt").iterdir()
     manifest = _environment_config(context)
@@ -553,8 +571,10 @@ url = "http://server:8000/mcp"
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match=f"MCP server name {name!r} is reserved"):
-        harbor.adapt(tmp_path)
+    failure = _failure(tmp_path)
+
+    assert [finding.code for finding in failure.findings] == ["harbor.invalid.reserved_mcp_name"]
+    assert name in failure.findings[0].message
 
 
 def test_adapt_groups_identical_images_and_keeps_row_metadata(
@@ -577,7 +597,7 @@ timeout_sec = 30
 """,
         encoding="utf-8",
     )
-    taskset = harbor.adapt(dataset_same_env)
+    taskset = _adapt(dataset_same_env)
 
     assert len(taskset) == 3
     assert len(taskset.environment_names()) == 1
@@ -602,7 +622,7 @@ timeout_sec = 30
 def test_distinct_environments_build_distinct_images(
     dataset_multi_env: Path,
 ) -> None:
-    taskset = harbor.adapt(dataset_multi_env)
+    taskset = _adapt(dataset_multi_env)
 
     assert len(taskset.environment_names()) == 2
     assert all(task.runtime_config is not None for task in taskset)
@@ -625,7 +645,7 @@ gpu_types = ["H100"]
         encoding="utf-8",
     )
 
-    (row,) = list(harbor.adapt(tmp_path))
+    (row,) = list(_adapt(tmp_path))
 
     assert row.columns == {"difficulty": "hard"}
     assert row.runtime_config is not None
@@ -648,7 +668,7 @@ def test_prebuilt_harbor_image_is_inspected_by_the_project_build(
         encoding="utf-8",
     )
 
-    harbor.adapt(tmp_path)
+    _adapt(tmp_path)
 
     (context,) = (tmp_path / ".hud-adapt").iterdir()
     project = context / "compose-project"
@@ -668,7 +688,7 @@ def test_zero_gpus_is_a_valid_harbor_resource_declaration(
     task = make_harbor_task(tmp_path, "cpu-only")
     (task / "task.toml").write_text("[environment]\ngpus = 0\n", encoding="utf-8")
 
-    (row,) = list(harbor.adapt(tmp_path))
+    (row,) = list(_adapt(tmp_path))
 
     assert row.runtime_config is not None
     assert row.runtime_config.resources is None
@@ -712,7 +732,7 @@ VERIFIER_ONLY = "yes"
         encoding="utf-8",
     )
 
-    harbor.adapt(tmp_path)
+    _adapt(tmp_path)
 
     (context,) = (tmp_path / ".hud-adapt").iterdir()
     manifest = _environment_config(context)
@@ -756,7 +776,7 @@ CMD ["ignored-by-harbor"]
         encoding="utf-8",
     )
 
-    harbor.adapt(tmp_path)
+    _adapt(tmp_path)
 
     (context,) = (tmp_path / ".hud-adapt").iterdir()
     manifest = _environment_config(context)
@@ -767,31 +787,73 @@ CMD ["ignored-by-harbor"]
 
 
 @pytest.mark.parametrize(
-    ("declaration", "expected"),
+    ("declaration", "code"),
     [
-        ('[environment]\nos = "windows"\n', "os="),
-        ('[environment]\ntpu = {type = "v5", topology = "2x2"}\n', "TPUs"),
+        ('[environment]\nos = "windows"\n', "harbor.unsupported.os"),
+        (
+            '[environment]\ntpu = {type = "v5", topology = "2x2"}\n',
+            "harbor.unsupported.tpu",
+        ),
         (
             '[environment]\ngpus = 1\ngpu_types = ["H100", "A100"]\n',
-            "multiple GPU types",
+            "harbor.unsupported.multiple_gpu_types",
         ),
-        ('[environment]\ngpu_types = ["H100"]\n', "GPU types without GPUs"),
+        (
+            '[environment]\ngpu_types = ["H100"]\n',
+            "harbor.invalid.gpu_type_without_gpu",
+        ),
         (
             '[[environment.mcp_servers]]\nname = "db"\ntransport = "stdio"\ncommand = "db-mcp"\n',
-            "stdio MCP servers",
+            "harbor.unsupported.mcp_stdio",
         ),
     ],
 )
 def test_unsupported_harbor_behaviour_fails_before_building(
     tmp_path: Path,
     declaration: str,
-    expected: str,
+    code: str,
 ) -> None:
     task = make_harbor_task(tmp_path, "task-a")
     (task / "task.toml").write_text(declaration, encoding="utf-8")
 
-    with pytest.raises(NotImplementedError, match=expected):
-        harbor.adapt(tmp_path)
+    failure = _failure(tmp_path)
+
+    assert [finding.code for finding in failure.findings] == [code]
+
+
+def test_dataset_adaptation_returns_successes_and_all_detectable_findings(
+    tmp_path: Path,
+) -> None:
+    make_harbor_task(tmp_path, "supported")
+    unsupported = make_harbor_task(tmp_path, "unsupported")
+    (unsupported / "instruction.md").unlink()
+    (unsupported / "task.toml").write_text(
+        """\
+[environment]
+os = "windows"
+skills_dir = "skills"
+
+[[environment.mcp_servers]]
+name = "shell"
+transport = "streamable-http"
+""",
+        encoding="utf-8",
+    )
+
+    result = harbor.adapt(tmp_path)
+
+    assert [task.slug for task in result.taskset] == ["supported"]
+    assert len(result.failures) == 1
+    failure = result.failures[0]
+    assert failure.task == "unsupported"
+    assert {finding.code for finding in failure.findings} == {
+        "harbor.unsupported.os",
+        "harbor.unsupported.skills_dir",
+        "harbor.invalid.reserved_mcp_name",
+        "harbor.invalid.mcp_url",
+        "harbor.invalid.missing_instruction",
+    }
+    assert {finding.kind for finding in failure.findings} == {"contract", "invalid"}
 
 
 @pytest.mark.parametrize("port", [3128, 3129, 8765])
@@ -805,8 +867,10 @@ def test_adapt_rejects_main_ports_reserved_by_hud(
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match=f"port {port} conflicts with a HUD reserved port"):
-        harbor.adapt(tmp_path)
+    failure = _failure(tmp_path)
+
+    assert [finding.code for finding in failure.findings] == ["harbor.invalid.reserved_main_port"]
+    assert str(port) in failure.findings[0].message
 
 
 def test_adapt_builds_a_separate_verifier_and_reuses_the_runtime(
@@ -855,7 +919,7 @@ timeout_sec = 10
         encoding="utf-8",
     )
 
-    (row,) = list(harbor.adapt(tmp_path))
+    (row,) = list(_adapt(tmp_path))
 
     assert row.id == "run"
     assert row.slug == "separate"
@@ -915,7 +979,7 @@ def test_image_task_keeps_only_the_verifier_as_a_build_service(
         encoding="utf-8",
     )
 
-    (row,) = list(harbor.adapt(tmp_path))
+    (row,) = list(_adapt(tmp_path))
 
     assert row.runtime_config is not None
     assert row.runtime_config.compose_service_access is True
@@ -948,7 +1012,7 @@ def test_separate_verifier_groups_have_distinct_environment_names(
         (task / "environment" / "compose.yaml").write_text(compose, encoding="utf-8")
         (task / "tests" / "Dockerfile").write_text(verifier, encoding="utf-8")
 
-    rows = list(harbor.adapt(tmp_path))
+    rows = list(_adapt(tmp_path))
 
     assert len({row.env for row in rows}) == 2
     compose_paths = {
@@ -969,8 +1033,13 @@ def test_separate_verifier_groups_have_distinct_environment_names(
 def test_multi_step_tasks_are_refused_directly(tmp_path: Path) -> None:
     make_multi_step_task(tmp_path, "multi")
 
-    with pytest.raises(NotImplementedError, match="multi-step"):
-        harbor.adapt(tmp_path)
+    failure = _failure(tmp_path)
+
+    assert {finding.code for finding in failure.findings} == {
+        "harbor.unsupported.multi_step",
+        "harbor.invalid.missing_instruction",
+        "harbor.invalid.missing_tests",
+    }
 
 
 def test_invalid_task_config_is_not_silently_defaulted(
@@ -979,8 +1048,9 @@ def test_invalid_task_config_is_not_silently_defaulted(
     task = make_harbor_task(tmp_path, "task-a")
     (task / "task.toml").write_text("[environment]\ncpus = 'many'\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="not a valid Harbor task"):
-        harbor.adapt(tmp_path)
+    failure = _failure(tmp_path)
+
+    assert [finding.code for finding in failure.findings] == ["harbor.invalid.task_config"]
 
 
 @pytest.mark.parametrize("source", ["/", "//", "/workspace/../secret"])
@@ -991,8 +1061,9 @@ def test_artifacts_must_name_normalized_paths_beneath_root(
     task = make_harbor_task(tmp_path, "task-a")
     (task / "task.toml").write_text(f'artifacts = ["{source}"]\n', encoding="utf-8")
 
-    with pytest.raises(ValueError, match="artifact source must name a path beneath /"):
-        harbor.adapt(tmp_path)
+    failure = _failure(tmp_path)
+
+    assert [finding.code for finding in failure.findings] == ["harbor.invalid.task_config"]
 
 
 def test_agent_timeout_becomes_per_task_agent_policy(
@@ -1001,7 +1072,7 @@ def test_agent_timeout_becomes_per_task_agent_policy(
     task = make_harbor_task(tmp_path, "task-a")
     (task / "task.toml").write_text("[agent]\ntimeout_sec = 60\n", encoding="utf-8")
 
-    taskset = harbor.adapt(tmp_path)
+    taskset = _adapt(tmp_path)
 
     (row,) = list(taskset)
     assert row.agent_config == {"timeout_seconds": 60.0}
@@ -1015,7 +1086,7 @@ def test_task_symlinks_are_copied_without_reading_host_files(
     task = make_harbor_task(tmp_path / "dataset", "task-a")
     (task / "tests" / "link").symlink_to(outside)
 
-    harbor.adapt(task.parent)
+    _adapt(task.parent)
 
     (context,) = (task.parent / ".hud-adapt").iterdir()
     copied = context / "compose-project" / "tests" / "task-a" / "link"
@@ -1031,9 +1102,9 @@ def test_adapt_hashes_links_not_their_targets(
     task = make_harbor_task(tmp_path / "dataset", "task-a")
     (task / "environment" / "link").symlink_to(outside)
 
-    (before,) = list(harbor.adapt(task.parent))
+    (before,) = list(_adapt(task.parent))
     outside.write_text("changed", encoding="utf-8")
-    (after,) = list(harbor.adapt(task.parent))
+    (after,) = list(_adapt(task.parent))
 
     assert before.runtime_config == after.runtime_config
 
@@ -1055,5 +1126,11 @@ def test_authored_runtime_assets_are_valid_source() -> None:
     assert result.returncode == 0, result.stderr.decode()
 
 
-def test_public_surface_is_only_the_two_real_operations() -> None:
-    assert harbor.__all__ == ["adapt", "export"]
+def test_public_surface_exposes_results_and_the_two_real_operations() -> None:
+    assert harbor.__all__ == [
+        "AdaptFailure",
+        "AdaptFinding",
+        "AdaptResult",
+        "adapt",
+        "export",
+    ]
