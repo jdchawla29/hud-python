@@ -205,6 +205,26 @@ def test_image_task_names_an_unnamed_multiline_final_stage(tmp_path: Path) -> No
     )
 
 
+def test_image_task_ignores_from_inside_dockerfile_heredoc(tmp_path: Path) -> None:
+    make_harbor_task(
+        tmp_path,
+        "task-a",
+        dockerfile="FROM python:3.12\nRUN python - <<'PY'\nfrom pathlib import Path\nPY\n",
+    )
+
+    harbor.adapt(tmp_path)
+
+
+def test_image_task_ignores_from_inside_spaced_shell_heredoc(tmp_path: Path) -> None:
+    make_harbor_task(
+        tmp_path,
+        "task-a",
+        dockerfile="FROM python:3.12\nRUN python - << 'PY'\nfrom pathlib import Path\nPY\n",
+    )
+
+    harbor.adapt(tmp_path)
+
+
 @pytest.mark.parametrize("stage", ["hud-base", "HUD-RUNTIME"])
 def test_image_task_rejects_reserved_user_stage_names(
     tmp_path: Path,

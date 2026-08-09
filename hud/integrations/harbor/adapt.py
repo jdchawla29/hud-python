@@ -222,6 +222,10 @@ def _dockerfile_stages(lines: list[str]) -> list[tuple[int, str | None]]:
             break
 
     stages: list[tuple[int, str | None]] = []
+    heredoc_pattern = re.compile(
+        r"<<(?P<strip>-?)[ \t]*(?P<quote>['\"]?)"
+        r"(?P<name>[A-Za-z_][\w.-]*)(?P=quote)"
+    )
     index = 0
     from_pattern = re.compile(
         r"^\s*FROM\s+(?:--platform=\S+\s+)?\S+"
@@ -240,12 +244,21 @@ def _dockerfile_stages(lines: list[str]) -> list[tuple[int, str | None]]:
             if not continued:
                 break
         instruction = " ".join(parts)
-        if not re.match(r"^\s*FROM\b", instruction, re.IGNORECASE):
-            continue
-        match = from_pattern.fullmatch(instruction)
-        if match is None:
-            raise ValueError("unsupported FROM instruction")
-        stages.append((index - 1, match.group("name")))
+        if re.match(r"^\s*FROM\b", instruction, re.IGNORECASE):
+            match = from_pattern.fullmatch(instruction)
+            if match is None:
+                raise ValueError("unsupported FROM instruction")
+            stages.append((index - 1, match.group("name")))
+        for heredoc in heredoc_pattern.finditer(instruction):
+            delimiter = heredoc.group("name")
+            strip_tabs = bool(heredoc.group("strip"))
+            while index < len(lines):
+                terminator = lines[index].rstrip("\r\n")
+                index += 1
+                if strip_tabs:
+                    terminator = terminator.lstrip("\t")
+                if terminator == delimiter:
+                    break
     return stages
 
 
