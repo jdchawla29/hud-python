@@ -191,6 +191,20 @@ def test_image_task_preserves_a_named_final_stage_verbatim(tmp_path: Path) -> No
     assert combined.startswith(dockerfile + "\nFROM final AS hud-runtime\n")
 
 
+def test_image_task_names_an_unnamed_multiline_final_stage(tmp_path: Path) -> None:
+    dockerfile = "FROM --platform=linux/amd64 \\\n  python:3.12-slim\nRUN true\n"
+    make_harbor_task(tmp_path, "task-a", dockerfile=dockerfile)
+
+    harbor.adapt(tmp_path)
+
+    (context,) = (tmp_path / ".hud-adapt").iterdir()
+    combined = (context / "compose-project" / "Dockerfile").read_text("utf-8")
+    assert combined.startswith(
+        "FROM --platform=linux/amd64 \\\n  python:3.12-slim AS hud-base\n"
+        "RUN true\n\nFROM hud-base AS hud-runtime\n"
+    )
+
+
 @pytest.mark.parametrize("stage", ["hud-base", "HUD-RUNTIME"])
 def test_image_task_rejects_reserved_user_stage_names(
     tmp_path: Path,

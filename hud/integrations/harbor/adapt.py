@@ -209,6 +209,46 @@ def _tree_hash(root: Path) -> str:
     return digest.hexdigest()[:16]
 
 
+def _dockerfile_stages(lines: list[str]) -> list[tuple[int, str | None]]:
+    escape = "\\"
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        directive = re.fullmatch(r"#\s*escape\s*=\s*([\\`])", stripped, re.IGNORECASE)
+        if directive is not None:
+            escape = directive.group(1)
+        if not stripped.startswith("#"):
+            break
+
+    stages: list[tuple[int, str | None]] = []
+    index = 0
+    from_pattern = re.compile(
+        r"^\s*FROM\s+(?:--platform=\S+\s+)?\S+"
+        r"(?:\s+AS\s+(?P<name>[A-Za-z0-9_.-]+))?"
+        r"\s*(?:#.*)?$",
+        re.IGNORECASE,
+    )
+    while index < len(lines):
+        parts: list[str] = []
+        while index < len(lines):
+            content = lines[index].rstrip("\r\n")
+            stripped = content.rstrip(" \t")
+            continued = stripped.endswith(escape)
+            parts.append(stripped[:-1] if continued else content)
+            index += 1
+            if not continued:
+                break
+        instruction = " ".join(parts)
+        if not re.match(r"^\s*FROM\b", instruction, re.IGNORECASE):
+            continue
+        match = from_pattern.fullmatch(instruction)
+        if match is None:
+            raise ValueError("unsupported FROM instruction")
+        stages.append((index - 1, match.group("name")))
+    return stages
+
+
 def adapt(
     path: str | Path,
     *,
@@ -560,31 +600,15 @@ def adapt(
             )
 
             lines = dockerfile_source.splitlines(keepends=True)
-            stages: list[tuple[int, re.Match[str]]] = []
-            from_pattern = re.compile(
-                r"^(?P<from>\s*FROM\s+(?:--platform=\S+\s+)?\S+)"
-                r"(?P<alias>\s+AS\s+(?P<name>[A-Za-z0-9_.-]+))?"
-                r"(?P<suffix>\s*(?:#.*)?)$",
-                re.IGNORECASE,
-            )
-            for index, raw_line in enumerate(lines):
-                line = raw_line.rstrip("\r\n")
-                if not re.match(r"^\s*FROM\b", line, re.IGNORECASE):
-                    continue
-                match = from_pattern.fullmatch(line)
-                if match is None:
-                    raise ValueError(
-                        f"{source.path.name} environment/Dockerfile has an unsupported "
-                        "multi-line FROM instruction"
-                    )
-                stages.append((index, match))
+            try:
+                stages = _dockerfile_stages(lines)
+            except ValueError as error:
+                raise ValueError(
+                    f"{source.path.name} environment/Dockerfile has an unsupported FROM instruction"
+                ) from error
             if not stages:
                 raise ValueError(f"{source.path.name} environment/Dockerfile has no FROM stage")
-            stage_names = {
-                match.group("name").lower()
-                for _, match in stages
-                if match.group("name") is not None
-            }
+            stage_names = {stage_name.lower() for _, stage_name in stages if stage_name is not None}
             reserved_names = {"hud-base", "hud-runtime"}
             if separate:
                 reserved_names.update({"hud-docker-cli", "hud-verifier", "hud-verifier-root"})
@@ -594,12 +618,15 @@ def adapt(
                     f"{source.path.name} environment/Dockerfile uses reserved stage "
                     f"{min(reserved)!r}"
                 )
-            final_index, final = stages[-1]
-            base_stage = final.group("name")
+            final_index, base_stage = stages[-1]
             if base_stage is None:
-                ending = lines[final_index][len(lines[final_index].rstrip("\r\n")) :]
+                line = lines[final_index]
+                content = line.rstrip("\r\n")
+                ending = line[len(content) :]
+                suffix = re.search(r"\s*(?:#.*)?$", content)
+                assert suffix is not None
                 lines[final_index] = (
-                    f"{final.group('from')} AS hud-base{final.group('suffix')}{ending}"
+                    f"{content[: suffix.start()]} AS hud-base{content[suffix.start() :]}{ending}"
                 )
                 base_stage = "hud-base"
             base_target = base_stage
