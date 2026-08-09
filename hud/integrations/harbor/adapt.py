@@ -161,7 +161,7 @@ class Phase(BaseModel):
     allowed_hosts: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
     environment: EnvironmentConfig | None = None
-    environment_mode: Literal["separate"] | None = None
+    environment_mode: Literal["shared", "separate"] | None = None
     collect: list[Collect] = Field(default_factory=list)
 
     @property

@@ -873,6 +873,20 @@ def test_adapt_rejects_main_ports_reserved_by_hud(
     assert str(port) in failure.findings[0].message
 
 
+def test_adapt_accepts_explicit_shared_verifier_mode(tmp_path: Path) -> None:
+    task = make_harbor_task(tmp_path, "shared")
+    (task / "task.toml").write_text(
+        '[verifier]\nenvironment_mode = "shared"\n',
+        encoding="utf-8",
+    )
+
+    (row,) = list(_adapt(tmp_path))
+
+    assert row.verifier is None
+    assert row.runtime_config is not None
+    assert row.runtime_config.compose_service_access is None
+
+
 def test_adapt_builds_a_separate_verifier_and_reuses_the_runtime(
     tmp_path: Path,
 ) -> None:
