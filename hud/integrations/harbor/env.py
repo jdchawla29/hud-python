@@ -20,6 +20,7 @@ from hud.capabilities import Capability
 from hud.environment import Environment, Mount, Peer, Workspace
 from hud.environment.egress import ANY_HOST, BRIDGE_PORT, VISITOR_PORT
 from hud.graders import EvaluationResult
+from hud.integrations.harbor.artifacts import copy_artifact, exclude_artifact_paths
 from hud.utils.process import ProcessResult, create_process_group_exec
 
 if TYPE_CHECKING:
@@ -335,23 +336,6 @@ async def docker(*args: str, max_wait: float = 60.0, check: bool = True) -> Proc
     return result
 
 
-def copy_artifact(source: Path, target: Path) -> None:
-    if source.is_symlink():
-        raise RuntimeError(f"artifact {source} is a symbolic link")
-    if source.resolve(strict=False) != source.absolute():
-        raise RuntimeError(f"artifact {source} has a symbolic link in its path")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if source.is_dir():
-        for root, directories, files in os.walk(source, followlinks=False):
-            for name in (*directories, *files):
-                entry = Path(root, name)
-                if entry.is_symlink():
-                    raise RuntimeError(f"artifact {source} contains symbolic link {entry}")
-        shutil.copytree(source, target)
-    elif source.exists() or source.is_symlink():
-        shutil.copy2(source, target, follow_symlinks=False)
-
-
 async def collect(task: dict[str, Any]) -> None:
     clear(ARTIFACTS)
     services: dict[str, str] = {}
@@ -425,6 +409,7 @@ async def collect(task: dict[str, Any]) -> None:
     for artifact in task["artifacts"]:
         source = artifact["source"]
         target = ARTIFACTS / source.lstrip("/").rstrip("/")
+        exclude = artifact.get("exclude", [])
         service = artifact["service"]
         container_id = await container(service)
         if container_id:
@@ -438,8 +423,9 @@ async def collect(task: dict[str, Any]) -> None:
             )
             if copied.returncode != 0:
                 continue
+            exclude_artifact_paths(target, exclude)
         else:
-            copy_artifact(Path(source), target)
+            copy_artifact(Path(source), target, exclude)
         if target.is_symlink() or any(path.is_symlink() for path in target.rglob("*")):
             raise RuntimeError(f"artifact {source} contains a symbolic link")
 

@@ -995,6 +995,43 @@ def test_artifacts_must_name_normalized_paths_beneath_root(
         harbor.adapt(tmp_path)
 
 
+def test_artifact_destination_and_excludes_are_preserved_on_the_task_row(
+    tmp_path: Path,
+) -> None:
+    task = make_harbor_task(tmp_path, "task-a")
+    (task / "task.toml").write_text(
+        'artifacts = [{ source = "/output", destination = "results", '
+        'exclude = ["*.tmp", "cache"] }]\n',
+        encoding="utf-8",
+    )
+
+    (row,) = list(harbor.adapt(tmp_path))
+
+    assert row.args["task"]["artifacts"] == [
+        {
+            "destination": "results",
+            "exclude": ["*.tmp", "cache"],
+            "service": "main",
+            "source": "/output",
+        }
+    ]
+
+
+@pytest.mark.parametrize("destination", ["/tmp/out", "../out", "a\\b", "manifest.json"])
+def test_artifact_destination_stays_beneath_the_host_artifacts_directory(
+    tmp_path: Path,
+    destination: str,
+) -> None:
+    task = make_harbor_task(tmp_path, "task-a")
+    (task / "task.toml").write_text(
+        f'artifacts = [{{ source = "/output", destination = {destination!r} }}]\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="artifact destination"):
+        harbor.adapt(tmp_path)
+
+
 def test_agent_timeout_becomes_per_task_agent_policy(
     tmp_path: Path,
 ) -> None:

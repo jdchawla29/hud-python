@@ -102,7 +102,8 @@ The adapter handles:
 - HTTP MCP servers (`sse` and `streamable-http`), healthchecks, network modes,
   allowlists, phase users, environment variables, and CPU/memory/GPU requests;
 - inline verifier scripts and separate verifier Dockerfiles;
-- verifier collect hooks and declared artifact paths from `main` or a sidecar.
+- verifier collect hooks and declared artifact paths from `main` or a sidecar,
+  including directory exclusions and host-side destinations.
 
 Unsupported declarations fail during adaptation. These include non-Linux and
 TPU environments, stdio MCP servers, skills directories, multi-step tasks,

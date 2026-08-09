@@ -11,10 +11,10 @@ import shlex
 import shutil
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from hud.capabilities import Capability
 from hud.environment.egress import BRIDGE_PORT, VISITOR_PORT
@@ -22,6 +22,8 @@ from hud.eval import Task, Taskset
 from hud.eval.compose import ComposeConfig, ComposeHealthcheck, ComposeService
 from hud.eval.runtime import RuntimeConfig, RuntimeGPU, RuntimeResources
 from hud.utils.naming import normalize_environment_name
+
+from .artifacts import Artifact
 
 LOGGER = logging.getLogger(__name__)
 ASSETS = Path(__file__).parent
@@ -43,26 +45,6 @@ COMPOSE_FILENAMES = (
     "docker-compose.yaml",
     "docker-compose.yml",
 )
-
-
-class Artifact(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    source: str = Field(pattern=r"^/")
-    service: str = Field(default="main", min_length=1)
-
-    @model_validator(mode="before")
-    @classmethod
-    def expand_path(cls, value: Any) -> Any:
-        return {"source": value} if isinstance(value, str) else value
-
-    @field_validator("source")
-    @classmethod
-    def normalize_source(cls, value: str) -> str:
-        path = PurePosixPath(value)
-        if len(path.parts) == 1 or ".." in path.parts:
-            raise ValueError("artifact source must name a path beneath /")
-        return str(path)
 
 
 class Collect(BaseModel):
@@ -825,7 +807,13 @@ fi
                 "verifier_timeout": config.verifier.timeout_sec or 600.0,
                 "separate_verifier": task_separate,
                 "collect": [hook.model_dump() for hook in config.verifier.collect],
-                "artifacts": [artifact.model_dump() for artifact in config.artifacts],
+                "artifacts": [
+                    artifact.model_dump(
+                        exclude_none=True,
+                        exclude={"exclude"} if not artifact.exclude else None,
+                    )
+                    for artifact in config.artifacts
+                ],
             }
             phase_environment = config.verifier.environment or EnvironmentConfig()
             gpu_count = max(config.environment.gpus or 0, phase_environment.gpus or 0)
