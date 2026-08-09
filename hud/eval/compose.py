@@ -35,7 +35,8 @@ def _interpolate_compose_value(value: str, environment: Mapping[str, str]) -> st
             break
         result.append(value[index:marker])
         if marker + 1 >= len(value):
-            raise ValueError("invalid Compose interpolation: trailing '$'")
+            result.append("$")
+            break
         following = value[marker + 1]
         if following == "$":
             result.append("$")
@@ -62,7 +63,9 @@ def _interpolate_compose_value(value: str, environment: Mapping[str, str]) -> st
             continue
         match = _COMPOSE_VARIABLE.match(value, marker + 1)
         if match is None:
-            raise ValueError(f"invalid Compose interpolation near {value[marker : marker + 2]!r}")
+            result.append("$")
+            index = marker + 1
+            continue
         name = match.group()
         if name not in environment:
             raise ValueError(f"Compose variable {name!r} is not set by the project .env")

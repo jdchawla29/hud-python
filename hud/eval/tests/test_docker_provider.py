@@ -1148,6 +1148,18 @@ def test_compose_config_rejects_unbound_host_variables(
         ComposeConfig.from_file(compose)
 
 
+def test_compose_config_preserves_shell_dollar_syntax(tmp_path: Path) -> None:
+    compose = tmp_path / "compose.yaml"
+    compose.write_text(
+        "services:\n  main:\n    command: ['sh', '-c', 'test $? = $']\n",
+        encoding="utf-8",
+    )
+
+    service = ComposeConfig.from_file(compose).services["main"]
+
+    assert service.command == ["sh", "-c", "test $? = $"]
+
+
 def test_compose_config_reports_required_artifact_variables(tmp_path: Path) -> None:
     compose = tmp_path / "compose.yaml"
     compose.write_text(
