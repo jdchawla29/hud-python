@@ -1098,7 +1098,6 @@ services:
 @pytest.mark.parametrize(
     "service",
     [
-        "command: echo $VALUE",
         "extends: {file: base.yaml, service: base}",
     ],
 )
@@ -1107,6 +1106,56 @@ def test_compose_config_rejects_external_resolution(tmp_path: Path, service: str
     compose.write_text(f"services:\n  main:\n    {service}\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="does not support Compose"):
+        ComposeConfig.from_file(compose)
+
+
+def test_compose_config_interpolates_only_artifact_supplied_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOST_ONLY", "secret")
+    (tmp_path / ".env").write_text("IMAGE=example:1\nEMPTY=\n", encoding="utf-8")
+    compose = tmp_path / "compose.yaml"
+    compose.write_text(
+        """
+services:
+  main:
+    image: ${IMAGE}
+    command: "${EMPTY:-serve} $$HOME ${MISSING-default}"
+    environment:
+      LITERAL: '$HOST_ONLY'
+""",
+        encoding="utf-8",
+    )
+
+    service = ComposeConfig.from_file(compose).services["main"]
+
+    assert service.image == "example:1"
+    assert service.command == ["serve", "$HOME", "default"]
+    assert service.environment == {"LITERAL": "$HOST_ONLY"}
+
+
+def test_compose_config_rejects_unbound_host_variables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOST_ONLY", "secret")
+    compose = tmp_path / "compose.yaml"
+    compose.write_text(
+        "services:\n  main:\n    image: $HOST_ONLY\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"HOST_ONLY.*not set by the project \.env"):
+        ComposeConfig.from_file(compose)
+
+
+def test_compose_config_reports_required_artifact_variables(tmp_path: Path) -> None:
+    compose = tmp_path / "compose.yaml"
+    compose.write_text(
+        "services:\n  main:\n    image: ${IMAGE:?set IMAGE in .env}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"set IMAGE in \.env"):
         ComposeConfig.from_file(compose)
 
 

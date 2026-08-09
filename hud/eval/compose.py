@@ -14,10 +14,126 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
+from dotenv import dotenv_values
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
+
+
+_COMPOSE_VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _interpolate_compose_value(value: str, environment: Mapping[str, str]) -> str:
+    result: list[str] = []
+    index = 0
+    while index < len(value):
+        marker = value.find("$", index)
+        if marker < 0:
+            result.append(value[index:])
+            break
+        result.append(value[index:marker])
+        if marker + 1 >= len(value):
+            raise ValueError("invalid Compose interpolation: trailing '$'")
+        following = value[marker + 1]
+        if following == "$":
+            result.append("$")
+            index = marker + 2
+            continue
+        if following == "{":
+            depth = 1
+            end = marker + 2
+            while end < len(value) and depth:
+                if value.startswith("${", end):
+                    depth += 1
+                    end += 2
+                    continue
+                if value[end] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                end += 1
+            if depth:
+                raise ValueError("invalid Compose interpolation: unclosed variable")
+            expression = value[marker + 2 : end]
+            result.append(_resolve_compose_variable(expression, environment))
+            index = end + 1
+            continue
+        match = _COMPOSE_VARIABLE.match(value, marker + 1)
+        if match is None:
+            raise ValueError(f"invalid Compose interpolation near {value[marker : marker + 2]!r}")
+        name = match.group()
+        if name not in environment:
+            raise ValueError(f"Compose variable {name!r} is not set by the project .env")
+        result.append(environment[name])
+        index = match.end()
+    return "".join(result)
+
+
+def _resolve_compose_variable(expression: str, environment: Mapping[str, str]) -> str:
+    match = _COMPOSE_VARIABLE.match(expression)
+    if match is None:
+        raise ValueError(f"invalid Compose interpolation expression {expression!r}")
+    name = match.group()
+    suffix = expression[match.end() :]
+    value = environment.get(name)
+    if not suffix:
+        if value is None:
+            raise ValueError(f"Compose variable {name!r} is not set by the project .env")
+        return value
+
+    operator = next(
+        (item for item in (":-", ":?", ":+", "-", "?", "+") if suffix.startswith(item)), None
+    )
+    if operator is None:
+        raise ValueError(f"invalid Compose interpolation expression {expression!r}")
+    operand = suffix[len(operator) :]
+    is_set = value is not None
+    is_nonempty = is_set and value != ""
+    if operator == ":-":
+        return value if is_nonempty else _interpolate_compose_value(operand, environment)
+    if operator == "-":
+        return value if is_set else _interpolate_compose_value(operand, environment)
+    if operator == ":+":
+        return _interpolate_compose_value(operand, environment) if is_nonempty else ""
+    if operator == "+":
+        return _interpolate_compose_value(operand, environment) if is_set else ""
+    if (operator == ":?" and not is_nonempty) or (operator == "?" and not is_set):
+        detail = operand or f"Compose variable {name!r} is required"
+        raise ValueError(detail)
+    assert value is not None
+    return value
+
+
+def _interpolate_compose_node(
+    node: Node,
+    environment: Mapping[str, str],
+    seen: set[int],
+) -> None:
+    if id(node) in seen:
+        return
+    seen.add(id(node))
+    if isinstance(node, MappingNode):
+        for _, value in node.value:
+            _interpolate_compose_node(value, environment, seen)
+    elif isinstance(node, SequenceNode):
+        for value in node.value:
+            _interpolate_compose_node(value, environment, seen)
+    elif isinstance(node, ScalarNode) and node.tag == "tag:yaml.org,2002:str" and node.style != "'":
+        node.value = _interpolate_compose_value(node.value, environment)
+
+
+def _load_compose_document(source: str, environment: Mapping[str, str]) -> object:
+    loader = yaml.SafeLoader(source)
+    try:
+        node = loader.get_single_node()
+        if node is None:
+            return None
+        _interpolate_compose_node(node, environment, set())
+        return loader.construct_document(node)
+    finally:
+        loader.dispose()
 
 
 class ComposeHealthcheck(BaseModel):
@@ -146,9 +262,12 @@ class ComposeConfig(BaseModel):
     def from_file(cls, path: Path) -> ComposeConfig:
         """Load a self-contained authored Compose document without Docker."""
         source = path.read_text(encoding="utf-8")
-        if re.search(r"(?<!\$)\$(?:\{|[A-Za-z_])", source):
-            raise ValueError("remote adaptation does not support Compose interpolation")
-        raw = yaml.safe_load(source)
+        environment = {
+            key: value
+            for key, value in dotenv_values(path.parent / ".env", interpolate=False).items()
+            if value is not None
+        }
+        raw = _load_compose_document(source, environment)
         if not isinstance(raw, dict):
             raise ValueError(f"{path.name} is not a Compose document")
         document = raw
