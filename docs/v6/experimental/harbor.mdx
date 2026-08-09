@@ -97,7 +97,8 @@ runtime isolation are described in
 The adapter handles:
 
 - an `environment/Dockerfile`, an `environment.docker_image`, or a Compose
-  project with a `main` service;
+  project; when authored Compose omits `main`, the environment recipe supplies
+  that agent service;
 - Compose sidecars with any number of declared TCP endpoints;
 - HTTP MCP servers (`sse` and `streamable-http`), healthchecks, network modes,
   allowlists, phase users, environment variables, and CPU/memory/GPU requests;

@@ -297,9 +297,9 @@ def adapt(
         if authored_compose is not None:
             try:
                 compose = ComposeConfig.from_file(authored_compose)
-                compose.services["main"]
-            except (ValidationError, KeyError) as error:
+            except ValidationError as error:
                 raise ValueError(f"{task_dir.name} did not resolve to a Compose project") from error
+            compose.services.setdefault("main", ComposeService())
             compose.name = None
 
         instruction = task_dir / "instruction.md"

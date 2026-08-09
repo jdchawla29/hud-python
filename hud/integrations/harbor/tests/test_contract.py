@@ -490,6 +490,21 @@ def test_adapt_accepts_sidecars_without_agent_routing(
     harbor.adapt(tmp_path)
 
 
+def test_adapt_merges_implicit_main_into_authored_compose(tmp_path: Path) -> None:
+    task = make_harbor_task(tmp_path, "task-a")
+    (task / "environment" / "compose.yaml").write_text(
+        "services:\n  default:\n    image: sidecar:latest\n",
+        encoding="utf-8",
+    )
+
+    harbor.adapt(tmp_path)
+
+    (context,) = (tmp_path / ".hud-adapt").iterdir()
+    compose = json.loads((context / "compose-project" / "compose.json").read_text("utf-8"))
+    assert {"main", "default"} <= compose["services"].keys()
+    assert _environment_config(context)["peers"] == []
+
+
 def test_adapt_routes_every_declared_sidecar_tcp_port(
     tmp_path: Path,
 ) -> None:
