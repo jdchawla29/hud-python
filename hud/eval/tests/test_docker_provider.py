@@ -266,6 +266,7 @@ class _DaytonaImage:
 class _DaytonaResources:
     cpu: float | None = None
     memory: int | None = None
+    disk: int | None = None
     gpu: int | None = None
     gpu_type: list[object] | None = None
 
@@ -1309,6 +1310,44 @@ async def test_daytona_rejects_a_fractional_cpu_request(monkeypatch: pytest.Monk
     with pytest.raises(ValueError, match="whole number of CPUs"):
         async with DaytonaRuntime(runtime_config=config)(_row()):
             pass
+
+
+async def test_daytona_rounds_minimum_storage_up_to_gibibytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    daytona = _install_fake_daytona(monkeypatch)
+    config = RuntimeConfig(image="img:tag", resources=RuntimeResources(storage_mb=1025))
+
+    async with DaytonaRuntime(runtime_config=config)(_row()):
+        pass
+
+    assert daytona.created[-1].resources.disk == 2
+
+
+async def test_docker_rejects_minimum_storage_it_cannot_guarantee(
+    tmp_path: Path, docker_log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_fake_docker(tmp_path, port_behavior=":", monkeypatch=monkeypatch)
+    config = RuntimeConfig(image="img:tag", resources=RuntimeResources(storage_mb=1024))
+
+    with pytest.raises(ValueError, match=r"cannot guarantee.*storage_mb"):
+        async with DockerRuntime(runtime_config=config)(_row()):
+            pass
+
+    assert await _docker_calls(docker_log) == []
+
+
+async def test_modal_rejects_minimum_storage_it_cannot_guarantee(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _install_fake_modal(monkeypatch)
+    config = RuntimeConfig(image="img:tag", resources=RuntimeResources(storage_mb=1024))
+
+    with pytest.raises(ValueError, match=r"cannot guarantee.*storage_mb"):
+        async with ModalRuntime(runtime_config=config)(_row()):
+            pass
+
+    assert "sandbox" not in calls
 
 
 async def test_daytona_names_a_sandbox_it_could_not_delete(

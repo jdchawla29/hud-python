@@ -114,6 +114,7 @@ class RuntimeResources(BaseModel):
 
     cpu: float | None = Field(default=None, gt=0)
     memory_mb: int | None = Field(default=None, gt=0)
+    storage_mb: int | None = Field(default=None, gt=0)
     gpu: RuntimeGPU | None = None
 
 
@@ -598,6 +599,8 @@ class DockerRuntime:
         config = (self.runtime_config or RuntimeConfig()).with_overrides(task.runtime_config)
         if config.limits is not None and config.limits.model_dump(exclude_none=True):
             raise ValueError("DockerRuntime does not support runtime_config limits")
+        if config.resources is not None and config.resources.storage_mb is not None:
+            raise ValueError("DockerRuntime cannot guarantee runtime_config.resources.storage_mb")
         compose_source = config.compose_source()
         if compose_source is not None:
             if self.run_args:
@@ -796,6 +799,8 @@ class ModalRuntime:
     @asynccontextmanager
     async def __call__(self, task: Task) -> AsyncIterator[Runtime]:
         config = (self.runtime_config or RuntimeConfig()).with_overrides(task.runtime_config)
+        if config.resources is not None and config.resources.storage_mb is not None:
+            raise ValueError("ModalRuntime cannot guarantee runtime_config.resources.storage_mb")
         compose_source = config.compose_source()
         compose = (
             compose_source.runnable_path("ModalRuntime") if compose_source is not None else None
@@ -1066,28 +1071,34 @@ class DaytonaRuntime:
                 raise ValueError("DaytonaRuntime does not support runtime_config.run_timeout_s")
 
             daytona_resources = None
-            if config.resources is not None:
+            resources = config.resources
+            if resources is not None:
                 resource_kwargs: dict[str, Any] = {}
-                if config.resources.cpu is not None:
+                if resources.cpu is not None:
                     # Daytona allocates whole cores; truncating resizes silently.
                     if (
-                        isinstance(config.resources.cpu, float)
-                        and not config.resources.cpu.is_integer()
+                        isinstance(resources.cpu, float)
+                        and not resources.cpu.is_integer()
                     ):
                         raise ValueError(
                             "DaytonaRuntime needs a whole number of CPUs, got "
-                            f"{config.resources.cpu}"
+                            f"{resources.cpu}"
                         )
-                    resource_kwargs["cpu"] = int(config.resources.cpu)
-                if config.resources.memory_mb is not None:
+                    resource_kwargs["cpu"] = int(resources.cpu)
+                if resources.memory_mb is not None:
                     resource_kwargs["memory"] = max(
                         1,
-                        (config.resources.memory_mb + 1023) // 1024,
+                        (resources.memory_mb + 1023) // 1024,
                     )
-                if config.resources.gpu is not None:
-                    resource_kwargs["gpu"] = config.resources.gpu.count
-                    if config.resources.gpu.type is not None:
-                        resource_kwargs["gpu_type"] = [GpuType(config.resources.gpu.type)]
+                if resources.storage_mb is not None:
+                    resource_kwargs["disk"] = max(
+                        1,
+                        (resources.storage_mb + 1023) // 1024,
+                    )
+                if resources.gpu is not None:
+                    resource_kwargs["gpu"] = resources.gpu.count
+                    if resources.gpu.type is not None:
+                        resource_kwargs["gpu_type"] = [GpuType(resources.gpu.type)]
                 if resource_kwargs:
                     daytona_resources = Resources(**resource_kwargs)
 
@@ -1119,6 +1130,12 @@ class DaytonaRuntime:
                             sizing.append(f"{daytona_resources.cpu}cpu")
                         if daytona_resources.memory:
                             sizing.append(f"{daytona_resources.memory}gb")
+                        if resources is not None and resources.storage_mb:
+                            storage_gb = max(
+                                1,
+                                (resources.storage_mb + 1023) // 1024,
+                            )
+                            sizing.append(f"{storage_gb}gb-disk")
                         if daytona_resources.gpu:
                             sizing.append(f"{daytona_resources.gpu}gpu")
                             sizing.extend(
@@ -1353,12 +1370,15 @@ class HUDRuntime:
             # what the task *is*; running without them would grade a
             # different environment than declared.
             resources = task.runtime_config.resources
-            if (resources is not None and resources.gpu is not None) or (
+            if (
+                resources is not None
+                and (resources.gpu is not None or resources.storage_mb is not None)
+            ) or (
                 task.runtime_config.limits is not None
                 and task.runtime_config.limits.model_dump(exclude_none=True)
             ):
                 raise ValueError(
-                    "HUDRuntime cannot honor this task's declared GPU/limits on an "
+                    "HUDRuntime cannot honor this task's declared GPU/storage/limits on an "
                     "already-deployed env; run it on a placement that provisions them"
                 )
             softly_ignored = task.runtime_config.model_dump(

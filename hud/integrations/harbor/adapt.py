@@ -837,6 +837,11 @@ fi
                     phase_environment.memory_mb or 0,
                 )
                 or None,
+                storage_mb=max(
+                    config.environment.storage_mb or 0,
+                    phase_environment.storage_mb or 0,
+                )
+                or None,
                 gpu=(
                     RuntimeGPU(
                         count=gpu_count,

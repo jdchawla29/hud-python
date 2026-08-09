@@ -619,6 +619,7 @@ difficulty = "hard"
 [environment]
 cpus = 4
 memory_mb = 8192
+storage_mb = 32768
 gpus = 2
 gpu_types = ["H100"]
 """,
@@ -634,6 +635,7 @@ gpu_types = ["H100"]
     assert row.runtime_config.resources is not None
     assert row.runtime_config.resources.cpu == 4
     assert row.runtime_config.resources.memory_mb == 8192
+    assert row.runtime_config.resources.storage_mb == 32768
     assert row.runtime_config.resources.gpu is not None
     assert row.runtime_config.resources.gpu.count == 2
     assert row.runtime_config.resources.gpu.type == "H100"

@@ -504,6 +504,19 @@ async def test_hud_runtime_drives_local_rollout(monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.asyncio
+async def test_hud_runtime_rejects_minimum_storage_it_cannot_guarantee() -> None:
+    task = Task(
+        env="e",
+        id="x",
+        runtime_config=RuntimeConfig(resources=RuntimeResources(storage_mb=1024)),
+    )
+
+    with pytest.raises(ValueError, match="GPU/storage/limits"):
+        async with HUDRuntime()(task):
+            pass
+
+
+@pytest.mark.asyncio
 async def test_runtime_session_create_payload_omits_trace_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -61,7 +61,12 @@ from hud.eval import RuntimeConfig, RuntimeResources, RuntimeGPU, RuntimeLimits
 
 RuntimeConfig(
     image="my-env",
-    resources=RuntimeResources(cpu=4, memory_mb=8192, gpu=RuntimeGPU(type="A100", count=1)),
+    resources=RuntimeResources(
+        cpu=4,
+        memory_mb=8192,
+        storage_mb=32768,
+        gpu=RuntimeGPU(type="A100", count=1),
+    ),
     limits=RuntimeLimits(startup_timeout_s=300, run_timeout_s=1800),
 )
 
@@ -74,12 +79,13 @@ RuntimeConfig(compose="./compose.yaml")
 | `compose` | Local path to a Compose file, or its serialized `ComposeConfig`. Mutually exclusive with `image`. |
 | `compose_project` | Local project root for upload, or a serialized `ComposeProjectRef`. Requires `compose`. |
 | `compose_service_access` | Mount the runtime's Docker socket into Compose `main` at `/media/hud/docker.sock`. Requires `compose`. |
-| `resources` | `RuntimeResources(cpu, memory_mb, gpu=RuntimeGPU(type, count))`. |
+| `resources` | `RuntimeResources(cpu, memory_mb, storage_mb, gpu=RuntimeGPU(type, count))`. `storage_mb` is a minimum disk requirement. |
 | `limits` | `RuntimeLimits(startup_timeout_s, run_timeout_s)`. |
 
-Support differs per runtime: `DockerRuntime`, `ModalRuntime`, and `DaytonaRuntime` accept it (Docker
-ignores `limits`; Daytona ignores `run_timeout_s` and resource overrides when booting from a snapshot).
-`LocalRuntime` and `HUDRuntime` reject a per-task `runtime_config`.
+Support differs per runtime. `DaytonaRuntime` provisions enough whole GiB to satisfy `storage_mb`;
+`DockerRuntime`, `ModalRuntime`, and `HUDRuntime` reject a disk minimum they cannot guarantee.
+Docker ignores `limits`; Daytona ignores `run_timeout_s` and resource overrides when booting from
+an already-built snapshot. `LocalRuntime` rejects a per-task `runtime_config`.
 
 ## Runtime directory
 

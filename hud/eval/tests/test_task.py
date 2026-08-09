@@ -127,7 +127,12 @@ def test_runtime_config_roundtrips_as_part_of_task_row() -> None:
         id="checkout",
         runtime_config=RuntimeConfig(
             image="hud-browser:firefox",
-            resources=RuntimeResources(cpu=2, memory_mb=4096, gpu=RuntimeGPU()),
+            resources=RuntimeResources(
+                cpu=2,
+                memory_mb=4096,
+                storage_mb=16384,
+                gpu=RuntimeGPU(),
+            ),
         ),
     ).model_dump(exclude_none=True)
 
@@ -135,7 +140,12 @@ def test_runtime_config_roundtrips_as_part_of_task_row() -> None:
 
     assert rebuilt.runtime_config == RuntimeConfig(
         image="hud-browser:firefox",
-        resources=RuntimeResources(cpu=2, memory_mb=4096, gpu=RuntimeGPU()),
+        resources=RuntimeResources(
+            cpu=2,
+            memory_mb=4096,
+            storage_mb=16384,
+            gpu=RuntimeGPU(),
+        ),
     )
     assert rebuilt.model_dump(exclude_none=True) == original
 
