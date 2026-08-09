@@ -106,9 +106,10 @@ The adapter handles:
 
 Unsupported declarations fail during adaptation. These include non-Linux and
 TPU environments, stdio MCP servers, skills directories, multi-step tasks,
-Compose interpolation/include/extends, and sidecars without exactly one usable
-TCP endpoint. A project also fails if its main service has neither an image nor
-a valid build recipe.
+Compose variables not bound by the project `.env` or document defaults,
+`include`, `extends`, and sidecars without exactly one usable TCP endpoint. A
+project also fails if its main service has neither an image nor a valid build
+recipe.
 
 ## Export HUD tasks to Harbor
 
