@@ -357,7 +357,6 @@ async def collect(task: dict[str, Any]) -> None:
     services: dict[str, str] = {}
 
     async def container(service: str) -> str:
-        service = "main" if service == "workspace" else service
         if service == "main":
             return ""
         if service in services:

@@ -98,7 +98,7 @@ The adapter handles:
 
 - an `environment/Dockerfile`, an `environment.docker_image`, or a Compose
   project with a `main` service;
-- Compose sidecars with one declared TCP endpoint each;
+- Compose sidecars with any number of declared TCP endpoints;
 - HTTP MCP servers (`sse` and `streamable-http`), healthchecks, network modes,
   allowlists, phase users, environment variables, and CPU/memory/GPU requests;
 - inline verifier scripts and separate verifier Dockerfiles;
@@ -106,9 +106,8 @@ The adapter handles:
 
 Unsupported declarations fail during adaptation. These include non-Linux and
 TPU environments, stdio MCP servers, skills directories, multi-step tasks,
-Compose interpolation/include/extends, and sidecars without exactly one usable
-TCP endpoint. A project also fails if its main service has neither an image nor
-a valid build recipe.
+Compose interpolation/include/extends. A project also fails if its main service
+has neither an image nor a valid build recipe.
 
 ## Export HUD tasks to Harbor
 

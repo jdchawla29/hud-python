@@ -478,7 +478,7 @@ def test_adapt_uses_compose_healthcheck_defaults(tmp_path: Path) -> None:
     }
 
 
-def test_adapt_requires_peer_port_in_the_compose_project(
+def test_adapt_accepts_sidecars_without_agent_routing(
     tmp_path: Path,
 ) -> None:
     task = make_harbor_task(tmp_path, "task-a")
@@ -487,21 +487,38 @@ def test_adapt_requires_peer_port_in_the_compose_project(
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="declares no TCP port"):
-        harbor.adapt(tmp_path)
+    harbor.adapt(tmp_path)
 
 
-def test_adapt_rejects_sidecar_without_a_tcp_port(
+def test_adapt_routes_every_declared_sidecar_tcp_port(
     tmp_path: Path,
 ) -> None:
     task = make_harbor_task(tmp_path, "task-a")
     (task / "environment" / "compose.yaml").write_text(
-        "services:\n  main: {}\n  worker:\n    image: no-ports:latest\n",
+        "services:\n  main: {}\n  worker:\n    image: worker:latest\n    expose: [8080, 9090]\n",
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="declares no TCP port"):
-        harbor.adapt(tmp_path)
+    harbor.adapt(tmp_path)
+
+    (context,) = (tmp_path / ".hud-adapt").iterdir()
+    assert _environment_config(context)["peers"] == [
+        {"name": "worker", "port": 8080},
+        {"name": "worker", "port": 9090},
+    ]
+
+
+def test_workspace_is_an_ordinary_sidecar_name(tmp_path: Path) -> None:
+    task = make_harbor_task(tmp_path, "task-a")
+    (task / "environment" / "compose.yaml").write_text(
+        "services:\n  main: {}\n  workspace:\n    image: worker:latest\n    expose: [8080]\n",
+        encoding="utf-8",
+    )
+
+    harbor.adapt(tmp_path)
+
+    (context,) = (tmp_path / ".hud-adapt").iterdir()
+    assert _environment_config(context)["peers"] == [{"name": "workspace", "port": 8080}]
 
 
 def test_network_mcp_servers_become_named_capabilities(

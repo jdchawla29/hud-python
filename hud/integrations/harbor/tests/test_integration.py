@@ -221,6 +221,27 @@ def test_separate_verifier_phase_behavior(separately_graded: dict[str, Run]) -> 
     test_harbor_phase_behavior(separately_graded, "sidecar-reachability")
 
 
+def test_workspace_named_sidecar_is_not_collected_from_main(
+    tmp_path_factory: pytest.TempPathFactory,
+    wheel: Path,
+) -> None:
+    dataset = tmp_path_factory.mktemp("harbor-workspace-sidecar") / "harbor-harness"
+    task = dataset / "sidecar-reachability"
+    shutil.copytree(TASKS / "sidecar-reachability", task)
+    for relative in (
+        "environment/compose.yaml",
+        "instruction.md",
+        "solution/solve.sh",
+        "task.toml",
+    ):
+        path = task / relative
+        path.write_text(path.read_text("utf-8").replace("web", "workspace"), encoding="utf-8")
+
+    run = asyncio.run(_grade_every_task(dataset, wheel))["sidecar-reachability"]
+
+    assert run.reward == 1.0, run.trace.error
+
+
 def test_separate_verifier_rejects_artifact_symlinks(
     tmp_path_factory: pytest.TempPathFactory, wheel: Path
 ) -> None:

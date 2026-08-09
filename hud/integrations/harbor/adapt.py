@@ -427,14 +427,7 @@ def adapt(
                     raise ValueError(
                         f"Compose service {service_name!r} has neither image nor build"
                     )
-                if len(ports) > 1:
-                    raise NotImplementedError(
-                        f"Compose service {service_name!r} exposes multiple ports; "
-                        "Peer names one endpoint"
-                    )
-                if not ports:
-                    raise ValueError(f"Compose service {service_name!r} declares no TCP port")
-                peers.append({"name": service_name, "port": next(iter(ports))})
+                peers.extend({"name": service_name, "port": port} for port in sorted(ports))
         context = dataset / ".hud-adapt" / name
         if context.exists():
             shutil.rmtree(context)

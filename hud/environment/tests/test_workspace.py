@@ -753,8 +753,17 @@ def test_a_peer_answers_at_the_address_the_task_expects() -> None:
     proxies = bind_addresses([Peer("agent", 3128), Peer("verifier", 3129)])
     assert proxies == {"agent": "127.0.0.2", "verifier": "127.0.0.2"}
 
-    with pytest.raises(ValueError, match="two peers are called"):
-        bind_addresses([Peer("db", 5432), Peer("db", 6379)])
+    service = bind_addresses([Peer("db", 5432), Peer("db", 6379)])
+    assert service == {"db": "127.0.0.1"}
+
+    service_with_reserved_port = bind_addresses(
+        [Peer("db", 5432), Peer("db", 6379)],
+        reserved_ports={5432},
+    )
+    assert service_with_reserved_port == {"db": "127.0.0.2"}
+
+    with pytest.raises(ValueError, match="declares port 5432 twice"):
+        bind_addresses([Peer("db", 5432), Peer("db", 5432)])
 
 
 def test_workspace_names_are_added_to_the_substrates_hosts_rather_than_replacing_it() -> None:
@@ -771,6 +780,12 @@ def test_workspace_names_are_added_to_the_substrates_hosts_rather_than_replacing
     assert "::1\tip6-localhost" in text
     assert "127.0.0.1\tmain" in text
     assert text.endswith("127.0.0.1\tdb\n")
+
+    same_service = hosts_text(
+        [Peer("db", 5432), Peer("db", 6379)],
+        "",
+    )
+    assert same_service == "127.0.0.1\tdb\n"
 
 
 @pytest.mark.asyncio
