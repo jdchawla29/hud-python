@@ -15,6 +15,8 @@ images. `export()` materializes HUD tasks as self-contained Harbor folders.
 A Harbor source is either one task directory or a dataset directory containing
 task directories. Each task contains `task.toml` and `instruction.md`, plus an
 environment image or build recipe and a `tests/` verifier.
+Multi-container sources use Harbor's `environment/docker-compose.yaml` recipe
+name; other Compose-like filenames remain ordinary environment files.
 
 ```python
 from hud.integrations import harbor

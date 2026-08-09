@@ -38,12 +38,7 @@ IGNORED = shutil.ignore_patterns(
 NetworkMode = Literal["public", "no-network", "allowlist"]
 MCPTransport = Literal["sse", "streamable-http", "stdio"]
 FindingKind = Literal["contract", "invalid"]
-COMPOSE_FILENAMES = (
-    "compose.yaml",
-    "compose.yml",
-    "docker-compose.yaml",
-    "docker-compose.yml",
-)
+COMPOSE_FILENAME = "docker-compose.yaml"
 
 
 class Artifact(BaseModel):
@@ -406,14 +401,8 @@ def _inspect_task(task_dir: Path) -> tuple[HarborTask | None, tuple[AdaptFinding
     )
 
     environment_dir = task_dir / "environment"
-    authored_compose = next(
-        (
-            environment_dir / filename
-            for filename in COMPOSE_FILENAMES
-            if (environment_dir / filename).is_file()
-        ),
-        None,
-    )
+    compose_path = environment_dir / COMPOSE_FILENAME
+    authored_compose = compose_path if compose_path.is_file() else None
     compose = None
     if authored_compose is not None:
         try:

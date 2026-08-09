@@ -191,6 +191,20 @@ def test_task_content_changes_do_not_rebuild_the_environment(tmp_path: Path) -> 
     ) == "#!/bin/sh\nexit 1\n"
 
 
+def test_image_task_keeps_non_recipe_compose_names_as_context_files(tmp_path: Path) -> None:
+    task = make_harbor_task(tmp_path, "task-a")
+    content = '{"api_gateway": {"interval": "30s"}}\n'
+    (task / "environment" / "docker-compose.yml").write_text(content, encoding="utf-8")
+
+    _adapt(tmp_path)
+
+    (context,) = (tmp_path / ".hud-adapt").iterdir()
+    environment = context / "compose-project" / "environment"
+    assert (environment / "docker-compose.yml").read_text("utf-8") == content
+    project = json.loads((context / "compose-project" / "compose.json").read_text("utf-8"))
+    assert set(project["services"]) == {"main"}
+
+
 def test_image_task_preserves_a_named_final_stage_verbatim(tmp_path: Path) -> None:
     dockerfile = 'FROM alpine AS build\r\nRUN true\r\nFROM alpine AS final\r\nCMD ["sh"]\r\n'
     make_harbor_task(tmp_path, "task-a", dockerfile=dockerfile)
@@ -242,7 +256,7 @@ def test_adapt_honors_compose_main_build_settings(
     task = make_harbor_task(tmp_path, "task-a", dockerfile=None)
     environment = task / "environment"
     environment.mkdir()
-    (environment / "compose.yaml").write_text(
+    (environment / "docker-compose.yaml").write_text(
         """\
 services:
   main:
@@ -272,7 +286,7 @@ def test_adapt_emits_compose_project_and_peers(
     tmp_path: Path,
 ) -> None:
     task = make_harbor_task(tmp_path, "task-a")
-    (task / "environment" / "compose.yaml").write_text(
+    (task / "environment" / "docker-compose.yaml").write_text(
         """\
 services:
   main:
@@ -371,7 +385,7 @@ def test_compose_adapt_retains_builds_without_local_docker(
     (database / "Dockerfile").write_text("FROM postgres:16\n", encoding="utf-8")
     (database / "db.env").write_text("POSTGRES_DB=test\n", encoding="utf-8")
     (database / "data").mkdir()
-    (task / "environment" / "compose.yaml").write_text(
+    (task / "environment" / "docker-compose.yaml").write_text(
         """\
 services:
   main:
@@ -416,7 +430,7 @@ def test_adapt_moves_compose_main_process_settings_into_the_workspace(
     tmp_path: Path,
 ) -> None:
     task = make_harbor_task(tmp_path, "task-a")
-    (task / "environment" / "compose.yaml").write_text(
+    (task / "environment" / "docker-compose.yaml").write_text(
         """\
 services:
   main:
@@ -443,7 +457,7 @@ def test_adapt_moves_compose_main_healthcheck_into_the_workspace(
     tmp_path: Path,
 ) -> None:
     task = make_harbor_task(tmp_path, "task-a")
-    (task / "environment" / "compose.yaml").write_text(
+    (task / "environment" / "docker-compose.yaml").write_text(
         """\
 services:
   main:
@@ -475,7 +489,7 @@ services:
 
 def test_adapt_uses_compose_healthcheck_defaults(tmp_path: Path) -> None:
     task = make_harbor_task(tmp_path, "task-a")
-    (task / "environment" / "compose.yaml").write_text(
+    (task / "environment" / "docker-compose.yaml").write_text(
         "services:\n  main:\n    healthcheck:\n      test: [CMD, 'true']\n",
         encoding="utf-8",
     )
@@ -498,7 +512,7 @@ def test_adapt_requires_peer_port_in_the_compose_project(
     tmp_path: Path,
 ) -> None:
     task = make_harbor_task(tmp_path, "task-a")
-    (task / "environment" / "compose.yaml").write_text(
+    (task / "environment" / "docker-compose.yaml").write_text(
         "services:\n  main: {}\n  redis:\n    image: redis:7-alpine\n",
         encoding="utf-8",
     )
@@ -512,7 +526,7 @@ def test_adapt_rejects_sidecar_without_a_tcp_port(
     tmp_path: Path,
 ) -> None:
     task = make_harbor_task(tmp_path, "task-a")
-    (task / "environment" / "compose.yaml").write_text(
+    (task / "environment" / "docker-compose.yaml").write_text(
         "services:\n  main: {}\n  worker:\n    image: no-ports:latest\n",
         encoding="utf-8",
     )
@@ -526,7 +540,7 @@ def test_network_mcp_servers_become_named_capabilities(
     tmp_path: Path,
 ) -> None:
     task = make_harbor_task(tmp_path, "task-a")
-    (task / "environment" / "compose.yaml").write_text(
+    (task / "environment" / "docker-compose.yaml").write_text(
         "services:\n  main: {}\n  redis:\n    image: redis:7-alpine\n    expose: [6379]\n",
         encoding="utf-8",
     )
@@ -862,7 +876,7 @@ def test_adapt_rejects_main_ports_reserved_by_hud(
     port: int,
 ) -> None:
     task = make_harbor_task(tmp_path, "task-a")
-    (task / "environment" / "compose.yaml").write_text(
+    (task / "environment" / "docker-compose.yaml").write_text(
         f"services:\n  main:\n    expose: [{port}]\n",
         encoding="utf-8",
     )
@@ -877,7 +891,7 @@ def test_adapt_builds_a_separate_verifier_and_reuses_the_runtime(
     tmp_path: Path,
 ) -> None:
     task = make_harbor_task(tmp_path, "separate")
-    (task / "environment" / "compose.yaml").write_text(
+    (task / "environment" / "docker-compose.yaml").write_text(
         "services:\n  main: {}\n  redis:\n    image: redis:7-alpine\n    expose: [6379]\n",
         encoding="utf-8",
     )
@@ -1009,7 +1023,7 @@ def test_separate_verifier_groups_have_distinct_environment_names(
     for name in ("task-a", "task-b"):
         task = make_harbor_task(tmp_path, name)
         (task / "task.toml").write_text(declaration, encoding="utf-8")
-        (task / "environment" / "compose.yaml").write_text(compose, encoding="utf-8")
+        (task / "environment" / "docker-compose.yaml").write_text(compose, encoding="utf-8")
         (task / "tests" / "Dockerfile").write_text(verifier, encoding="utf-8")
 
     rows = list(_adapt(tmp_path))
