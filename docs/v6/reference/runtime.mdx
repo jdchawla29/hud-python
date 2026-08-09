@@ -84,7 +84,7 @@ RuntimeConfig(compose="./compose.yaml")
 
 Support differs per runtime. `DaytonaRuntime` provisions enough whole GiB to satisfy `storage_mb`;
 `DockerRuntime`, `ModalRuntime`, and `HUDRuntime` reject a disk minimum they cannot guarantee.
-Docker ignores `limits`; Daytona ignores `run_timeout_s` and resource overrides when booting from
+Docker ignores `limits`; Daytona rejects `run_timeout_s` and resource overrides when booting from
 an already-built snapshot. `LocalRuntime` rejects a per-task `runtime_config`.
 
 ## Runtime directory
