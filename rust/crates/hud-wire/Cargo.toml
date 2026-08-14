@@ -1,0 +1,12 @@
+[package]
+name = "hud-wire"
+description = "JSON-RPC framing and byte splicing for the HUD control channel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true

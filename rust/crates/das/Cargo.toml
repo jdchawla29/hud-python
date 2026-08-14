@@ -1,0 +1,30 @@
+[package]
+name = "das"
+description = "Project, worktree, and thread-weaving coding agent on the HUD Rust SDK"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+dotenvy.workspace = true
+futures.workspace = true
+hud-client.workspace = true
+hud-eval.workspace = true
+hud-types.workspace = true
+indexmap.workspace = true
+ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
+reqwest.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time = { workspace = true, features = ["formatting"] }
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+uuid.workspace = true

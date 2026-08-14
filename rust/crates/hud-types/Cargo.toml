@@ -1,0 +1,14 @@
+[package]
+name = "hud-types"
+description = "Core wire types for the HUD protocol (hud/1.0)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+thiserror.workspace = true
+time.workspace = true

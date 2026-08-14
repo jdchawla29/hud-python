@@ -1,0 +1,23 @@
+[package]
+name = "hud-client"
+description = "Client for the HUD wire protocol (hud/1.0)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+ssh = ["dep:russh"]
+
+[dependencies]
+hud-types.workspace = true
+hud-wire.workspace = true
+russh = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+hud-env.workspace = true
