@@ -1,19 +1,16 @@
-//! Slate-style thread weaving on the HUD Rust SDK — a port of the
-//! `cookbooks/slate-coding` Python harness, extended into an interactive,
-//! Claude-Code-style session.
+//! Interactive thread-weaving orchestration on the HUD Rust SDK.
 //!
 //! One orchestrator model plans and never touches the environment; it
-//! dispatches single bounded actions to persistent worker threads, each acting
-//! on the task workspace over `ssh/2` and compressing what it did into an
-//! *episode*. Unlike the one-shot cookbook, the session stays live: after a
-//! turn's reply the workspace, SSH connection, and orchestrator conversation
-//! persist, and the user can send follow-up messages or interrupt in flight.
+//! dispatches single bounded actions to persistent Codex or Claude CLI worker
+//! sessions, each acting on the same task workspace and returning an *episode*.
+//! Unlike the one-shot cookbook, the HUD workspace and orchestrator conversation
+//! stay live for follow-up messages, and in-flight workers can be interrupted.
 
-use crate::gateway::{ChatResponse, Gateway, ToolUse};
+use crate::harness::{WorkerError, WorkerHarness, WorkerReporter, WorkerSession};
 use crate::interrupt::{Interrupt, InterruptRx};
+use crate::orchestrator::{ChatResponse, Orchestrator, ToolUse};
 use crate::session::SessionStore;
 use async_trait::async_trait;
-use hud_client::ssh::SshClient;
 use hud_eval::{Agent, AgentError, Run};
 use hud_types::{Step, StepSource};
 use serde::{Deserialize, Serialize};
@@ -43,19 +40,6 @@ Verify work with follow-up actions instead of trusting a thread's claim of
 success. This is an interactive session: when the current request is complete,
 call finish(answer) with a short report; the user may then send a follow-up.";
 
-pub const WORKER_SYSTEM: &str = "You are a worker thread in a coding agent. You receive one
-bounded action at a time and execute exactly that action in the workspace
-using the bash tool - nothing more, nothing less. Work in the current
-directory. When the action is complete (or genuinely blocked), stop calling
-tools and state the outcome plainly, with the exact paths, commands, and
-errors that matter.";
-
-const COMPRESS_PROMPT: &str = "The action \"{action}\" is now over. Write the episode for
-it: a compressed record of what you did, what you found, and the exact details
-worth keeping (paths, symbols, commands, key file contents, errors). Drop the
-tactical noise. Write a plain factual report; it will be read by the
-orchestrator and may seed other threads.";
-
 fn dispatch_tool() -> Value {
     json!({
         "name": "dispatch",
@@ -83,18 +67,6 @@ fn finish_tool() -> Value {
             "type": "object",
             "properties": {"answer": {"type": "string"}},
             "required": ["answer"],
-        },
-    })
-}
-
-fn bash_tool() -> Value {
-    json!({
-        "name": "bash",
-        "description": "Run a bash command in the workspace. Returns stdout/stderr and the exit code.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"command": {"type": "string"}},
-            "required": ["command"],
         },
     })
 }
@@ -133,6 +105,8 @@ pub enum UiEvent {
     Bash {
         thread: String,
         command: String,
+        #[serde(default)]
+        output: String,
         exit_status: u32,
     },
     Episode {
@@ -163,35 +137,28 @@ pub enum UiEvent {
 }
 
 #[derive(Debug, Clone)]
-pub struct SlateConfig {
-    pub orch_model: String,
-    pub worker_model: String,
+pub struct DasConfig {
     pub max_turns: u32,
-    pub max_thread_steps: u32,
     pub thread_timeout: Duration,
-    pub command_timeout: Duration,
     pub file_tracking_interval: Duration,
 }
 
-impl Default for SlateConfig {
+impl Default for DasConfig {
     fn default() -> Self {
-        SlateConfig {
-            orch_model: "claude-opus-4-8".to_string(),
-            worker_model: "claude-sonnet-4-6".to_string(),
+        DasConfig {
             max_turns: 40,
-            max_thread_steps: 20,
             thread_timeout: Duration::from_secs(600),
-            command_timeout: Duration::from_secs(120),
             file_tracking_interval: Duration::from_secs(2),
         }
     }
 }
 
-/// Slate-style interactive orchestrator. Holds configuration and the per-
+/// Interactive orchestrator. Holds configuration and the per-
 /// session channels; the conversation and worker threads live inside `run`.
-pub struct SlateAgent {
-    pub config: SlateConfig,
-    pub gateway: Gateway,
+pub struct DasAgent {
+    pub config: DasConfig,
+    pub orchestrator: Arc<dyn Orchestrator>,
+    pub worker_harness: Arc<dyn WorkerHarness>,
     pub events: UnboundedSender<UiEvent>,
     /// User messages after the first (which arrives as the task prompt).
     /// Closing the channel ends the session.
@@ -202,19 +169,15 @@ pub struct SlateAgent {
     pub session: Option<Arc<SessionStore>>,
 }
 
-impl SlateAgent {
+impl DasAgent {
     fn emit(&self, event: UiEvent) {
         let _ = self.events.send(event);
     }
 }
 
 #[async_trait]
-impl Agent for SlateAgent {
+impl Agent for DasAgent {
     async fn run(&self, run: &mut Run) -> Result<(), AgentError> {
-        let cap = run.client().binding("ssh")?.clone();
-        self.emit(UiEvent::Status("connecting to workspace over ssh/2".into()));
-        let ssh = Arc::new(SshClient::connect(&cap).await?);
-
         // Live workspace diffs (best-effort): if the env published a
         // filetracking binding, poll it in the background and emit FileChanged.
         let file_tracking = self.start_file_tracking(run).await;
@@ -222,8 +185,7 @@ impl Agent for SlateAgent {
         let (steps_tx, steps_rx) = tokio::sync::mpsc::unbounded_channel::<Step>();
         let ctx = Arc::new(WorkerCtx {
             config: self.config.clone(),
-            gateway: self.gateway.clone(),
-            ssh,
+            harness: Arc::clone(&self.worker_harness),
             events: self.events.clone(),
             steps: steps_tx,
         });
@@ -275,11 +237,11 @@ impl Agent for SlateAgent {
     }
 
     fn model(&self) -> Option<String> {
-        Some(self.config.orch_model.clone())
+        self.orchestrator.model().map(str::to_string)
     }
 }
 
-impl SlateAgent {
+impl DasAgent {
     async fn start_file_tracking(&self, run: &mut Run) -> Option<FileTracking> {
         let url = run.client().binding("filetracking").ok()?.url.clone();
         let mut ft = match hud_client::filetracking::FileTrackingClient::connect(&url).await {
@@ -343,7 +305,7 @@ fn emit_diff(events: &UnboundedSender<UiEvent>, diff: &hud_client::filetracking:
 /// Per-session mutable state: the orchestrator conversation, live worker
 /// threads, and the trace being filled.
 struct SessionRunner<'a> {
-    agent: &'a SlateAgent,
+    agent: &'a DasAgent,
     run: &'a mut Run,
     ctx: Arc<WorkerCtx>,
     threads: HashMap<String, WorkerThread>,
@@ -387,8 +349,8 @@ impl SessionRunner<'_> {
                     self.persist();
                     return;
                 }
-                resp = self.agent.gateway.messages(
-                    &self.agent.config.orch_model, ORCH_SYSTEM, &self.messages, &tools, 4096,
+                resp = self.agent.orchestrator.messages(
+                    ORCH_SYSTEM, &self.messages, &tools, 4096,
                 ) => resp,
             };
             let resp = match resp {
@@ -414,15 +376,23 @@ impl SessionRunner<'_> {
                 self.last_reply = text.clone();
             }
             self.run.record(agent_step(
-                &self.agent.config.orch_model,
+                self.agent
+                    .orchestrator
+                    .model()
+                    .unwrap_or("configured default"),
                 &resp,
                 dispatches.is_empty(),
-                [("role", json!("orchestrator"))],
+                [
+                    ("role", json!("orchestrator")),
+                    ("harness", json!(self.agent.orchestrator.kind())),
+                ],
             ));
-            self.emit(UiEvent::OrchTurn {
-                turn,
-                text: text.clone(),
-            });
+            if finish.is_none() && !dispatches.is_empty() {
+                self.emit(UiEvent::OrchTurn {
+                    turn,
+                    text: text.clone(),
+                });
+            }
             self.messages
                 .push(json!({"role": "assistant", "content": resp.content}));
 
@@ -496,45 +466,38 @@ impl SessionRunner<'_> {
             let dispatches = grouped.remove(thread_id).expect("grouped by order");
             let thread = self.threads.remove(thread_id);
             let ctx = Arc::clone(&self.ctx);
-            run_thread_batch(thread, dispatches, ctx)
+            let interrupt = self.interrupt.fork();
+            run_thread_batch(thread, dispatches, ctx, interrupt)
         }));
-
-        let batches = tokio::select! {
-            biased;
-            _ = self.interrupt.wait() => None,
-            batches = batch => Some(batches),
-        };
-
+        let batches = batch.await;
         let mut results: Vec<Value> = Vec::new();
-        match batches {
-            Some(batches) => {
-                for batch in batches {
-                    if let Some(thread) = batch.thread {
-                        self.threads.insert(thread.id.clone(), thread);
-                    }
-                    for (call_id, episode) in batch.episodes {
-                        results.push(tool_result(&call_id, &episode));
-                    }
-                }
-                self.messages
-                    .push(json!({"role": "user", "content": results}));
-                false
+        let mut interrupted = false;
+        for batch in batches {
+            interrupted |= batch.interrupted;
+            if let Some(thread) = batch.thread {
+                self.threads.insert(thread.id.clone(), thread);
             }
-            None => {
-                // Interrupted mid-batch: the in-flight thread futures were
-                // dropped (and their threads with them). Fill a tool_result for
-                // every dispatched call so the conversation stays valid.
-                for use_ in &dispatches {
+            for (call_id, episode) in batch.episodes {
+                results.push(tool_result(&call_id, &episode));
+            }
+        }
+        interrupted |= self.interrupt.tripped();
+        if interrupted {
+            for use_ in &dispatches {
+                if !results
+                    .iter()
+                    .any(|result| result["tool_use_id"] == use_.id)
+                {
                     results.push(tool_result(
                         &use_.id,
                         "[interrupted by user before completion]",
                     ));
                 }
-                self.messages
-                    .push(json!({"role": "user", "content": results}));
-                true
             }
         }
+        self.messages
+            .push(json!({"role": "user", "content": results}));
+        interrupted
     }
 
     fn emit_tokens(&self, resp: &ChatResponse) {
@@ -595,9 +558,8 @@ impl Dispatch {
 }
 
 struct WorkerCtx {
-    config: SlateConfig,
-    gateway: Gateway,
-    ssh: Arc<SshClient>,
+    config: DasConfig,
+    harness: Arc<dyn WorkerHarness>,
     events: UnboundedSender<UiEvent>,
     steps: UnboundedSender<Step>,
 }
@@ -605,18 +567,69 @@ struct WorkerCtx {
 struct ThreadBatch {
     thread: Option<WorkerThread>,
     episodes: Vec<(String, String)>,
+    interrupted: bool,
 }
 
 async fn run_thread_batch(
     thread: Option<WorkerThread>,
     dispatches: Vec<Dispatch>,
     ctx: Arc<WorkerCtx>,
+    mut interrupt: InterruptRx,
 ) -> ThreadBatch {
     let first = &dispatches[0];
-    let mut thread =
-        thread.unwrap_or_else(|| WorkerThread::new(first.thread_id.clone(), &first.seed_episodes));
+    let mut thread = match thread {
+        Some(thread) => thread,
+        None => {
+            let reporter = WorkerReporter::new(
+                first.thread_id.clone(),
+                ctx.harness.kind(),
+                ctx.harness.model().map(str::to_string),
+                ctx.events.clone(),
+                ctx.steps.clone(),
+            );
+            let start = ctx
+                .harness
+                .start(&first.thread_id, &first.seed_episodes, reporter);
+            tokio::pin!(start);
+            let deadline = tokio::time::sleep(ctx.config.thread_timeout);
+            tokio::pin!(deadline);
+            match tokio::select! {
+                biased;
+                _ = interrupt.wait() => Err(WorkerError::Interrupted),
+                _ = &mut deadline => Err(WorkerError::Timeout {
+                    seconds: ctx.config.thread_timeout.as_secs(),
+                }),
+                result = &mut start => result,
+            } {
+                Ok(session) => WorkerThread {
+                    id: first.thread_id.clone(),
+                    session,
+                },
+                Err(error) => {
+                    let interrupted = matches!(error, WorkerError::Interrupted);
+                    return ThreadBatch {
+                        thread: None,
+                        episodes: dispatches
+                            .iter()
+                            .map(|dispatch| {
+                                (
+                                    dispatch.call_id.clone(),
+                                    format!(
+                                        "[thread {:?} failed to start: {error}]",
+                                        dispatch.thread_id
+                                    ),
+                                )
+                            })
+                            .collect(),
+                        interrupted,
+                    };
+                }
+            }
+        }
+    };
     let mut episodes = Vec::new();
     let mut discarded = false;
+    let mut interrupted = false;
     for dispatch in &dispatches {
         if discarded {
             episodes.push((
@@ -629,22 +642,27 @@ async fn run_thread_batch(
             ));
             continue;
         }
-        match tokio::time::timeout(
-            ctx.config.thread_timeout,
-            thread.act(&dispatch.action, &ctx),
-        )
-        .await
+        match thread
+            .session
+            .act(&dispatch.action, &mut interrupt, ctx.config.thread_timeout)
+            .await
         {
-            Ok(episode) => episodes.push((dispatch.call_id.clone(), episode)),
-            Err(_) => {
+            Ok(episode) => {
+                let _ = ctx.events.send(UiEvent::Episode {
+                    thread: thread.id.clone(),
+                    text: episode.clone(),
+                });
+                episodes.push((dispatch.call_id.clone(), episode));
+            }
+            Err(error) => {
                 discarded = true;
+                interrupted = matches!(error, WorkerError::Interrupted);
                 episodes.push((
                     dispatch.call_id.clone(),
                     format!(
-                        "[thread {:?} timed out after {:.0}s executing: {}. The thread was \
-                         discarded; re-dispatch a narrower action, seeded with prior episodes.]",
+                        "[thread {:?} failed while executing {:?}: {error}. The native session was \
+                         discarded; re-dispatch with prior episodes if needed.]",
                         dispatch.thread_id,
-                        ctx.config.thread_timeout.as_secs_f64(),
                         dispatch.action
                     ),
                 ));
@@ -654,178 +672,13 @@ async fn run_thread_batch(
     ThreadBatch {
         thread: (!discarded).then_some(thread),
         episodes,
+        interrupted,
     }
 }
 
-/// A persistent worker: accumulates tactical context across dispatched
-/// actions, executing one bounded action per `act` call via a small bash loop,
-/// then compressing that action's history into an episode.
 struct WorkerThread {
     id: String,
-    messages: Vec<Value>,
-}
-
-impl WorkerThread {
-    fn new(id: String, seed_episodes: &[String]) -> WorkerThread {
-        let mut messages = Vec::new();
-        if !seed_episodes.is_empty() {
-            let joined = seed_episodes.join("\n\n---\n\n");
-            messages.push(json!({
-                "role": "user",
-                "content": format!("Episodes from prior threads, for context:\n\n{joined}"),
-            }));
-        }
-        WorkerThread { id, messages }
-    }
-
-    async fn act(&mut self, action: &str, ctx: &WorkerCtx) -> String {
-        self.messages
-            .push(json!({"role": "user", "content": format!("Action: {action}")}));
-        for _ in 0..ctx.config.max_thread_steps {
-            let resp = match ctx
-                .gateway
-                .messages(
-                    &ctx.config.worker_model,
-                    WORKER_SYSTEM,
-                    &self.messages,
-                    &[bash_tool()],
-                    4096,
-                )
-                .await
-            {
-                Ok(resp) => resp,
-                Err(e) => return format!("[thread {:?} inference failed: {e}]", self.id),
-            };
-            let _ = ctx.events.send(UiEvent::Tokens {
-                input: resp.usage.input_tokens,
-                output: resp.usage.output_tokens,
-            });
-            let calls = resp.tool_uses();
-            let text = resp.text();
-            let _ = ctx.steps.send(agent_step(
-                &ctx.config.worker_model,
-                &resp,
-                calls.is_empty(),
-                [("thread", json!(self.id))],
-            ));
-            if !text.is_empty() {
-                let _ = ctx.events.send(UiEvent::WorkerText {
-                    thread: self.id.clone(),
-                    text,
-                });
-            }
-            self.messages
-                .push(json!({"role": "assistant", "content": resp.content}));
-            if calls.is_empty() {
-                break;
-            }
-            let mut results = Vec::new();
-            for call in &calls {
-                let command = call
-                    .input
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let (body, exit_status, is_error) = self.bash(command, ctx).await;
-                let _ = ctx.steps.send(tool_step(call, &body, is_error, &self.id));
-                let _ = ctx.events.send(UiEvent::Bash {
-                    thread: self.id.clone(),
-                    command: command.to_string(),
-                    exit_status,
-                });
-                results.push(json!({
-                    "type": "tool_result", "tool_use_id": call.id,
-                    "content": body, "is_error": is_error,
-                }));
-            }
-            self.messages
-                .push(json!({"role": "user", "content": results}));
-        }
-        self.compress(action, ctx).await
-    }
-
-    async fn bash(&self, command: &str, ctx: &WorkerCtx) -> (String, u32, bool) {
-        match tokio::time::timeout(ctx.config.command_timeout, ctx.ssh.run(command)).await {
-            Err(_) => (
-                format!(
-                    "$ {command}\n(timed out after {:.0}s)",
-                    ctx.config.command_timeout.as_secs_f64()
-                ),
-                124,
-                true,
-            ),
-            Ok(Err(e)) => (format!("$ {command}\n(ssh error: {e})"), 255, true),
-            Ok(Ok(result)) => {
-                let mut body = format!("$ {command}\n{}", result.stdout);
-                if !result.stderr.is_empty() {
-                    body.push_str(&format!("\nstderr:\n{}", result.stderr));
-                }
-                body.push_str(&format!("\n(exit {})", result.exit_status));
-                (body, result.exit_status, !result.success())
-            }
-        }
-    }
-
-    async fn compress(&self, action: &str, ctx: &WorkerCtx) -> String {
-        let prompt = COMPRESS_PROMPT.replace("{action}", action);
-        let mut messages = self.messages.clone();
-        let fold = matches!(
-            messages.last(),
-            Some(last) if last["role"] == "user" && last["content"].is_array()
-        );
-        if fold {
-            // The loop can end on a tool_result turn (step budget exhausted);
-            // fold the prompt in to keep tool_use/tool_result pairing.
-            messages
-                .last_mut()
-                .expect("checked")
-                .as_object_mut()
-                .unwrap()
-                .get_mut("content")
-                .unwrap()
-                .as_array_mut()
-                .unwrap()
-                .push(json!({"type": "text", "text": prompt}));
-        } else {
-            messages.push(json!({"role": "user", "content": prompt}));
-        }
-        let episode = match ctx
-            .gateway
-            .messages(
-                &ctx.config.worker_model,
-                WORKER_SYSTEM,
-                &messages,
-                &[],
-                1024,
-            )
-            .await
-        {
-            Ok(resp) => {
-                let _ = ctx.events.send(UiEvent::Tokens {
-                    input: resp.usage.input_tokens,
-                    output: resp.usage.output_tokens,
-                });
-                let text = resp.text();
-                let _ = ctx.steps.send(agent_step(
-                    &ctx.config.worker_model,
-                    &resp,
-                    true,
-                    [("thread", json!(self.id)), ("kind", json!("episode"))],
-                ));
-                if text.is_empty() {
-                    "(empty episode)".to_string()
-                } else {
-                    text
-                }
-            }
-            Err(e) => format!("[episode compression failed: {e}]"),
-        };
-        let _ = ctx.events.send(UiEvent::Episode {
-            thread: self.id.clone(),
-            text: episode.clone(),
-        });
-        episode
-    }
+    session: Box<dyn WorkerSession>,
 }
 
 /// An `AgentStep`-shaped trace step (`hud.step.v1` payload fields).
@@ -859,22 +712,5 @@ fn agent_step<const N: usize>(
     for (key, value) in extra {
         step.extra.insert(key.to_string(), value);
     }
-    step
-}
-
-/// A `ToolStep`-shaped trace step for one bash round-trip.
-fn tool_step(call: &ToolUse, body: &str, is_error: bool, thread: &str) -> Step {
-    let mut step = Step::new(StepSource::Tool);
-    let mut payload = Map::new();
-    payload.insert(
-        "call".to_string(),
-        json!({"id": call.id, "name": call.name, "arguments": call.input}),
-    );
-    payload.insert(
-        "result".to_string(),
-        json!({"content": [{"type": "text", "text": body}], "isError": is_error}),
-    );
-    step.payload = payload;
-    step.extra.insert("thread".to_string(), json!(thread));
     step
 }

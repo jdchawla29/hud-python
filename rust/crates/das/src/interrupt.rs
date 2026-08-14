@@ -55,6 +55,14 @@ pub struct InterruptRx {
 }
 
 impl InterruptRx {
+    /// Create another observer with the same consumed position. A pending trip
+    /// remains visible to both receivers.
+    pub fn fork(&self) -> InterruptRx {
+        InterruptRx {
+            rx: self.rx.clone(),
+        }
+    }
+
     /// Mark "now" as the baseline: interrupts observed before this are cleared.
     pub fn baseline(&mut self) {
         self.rx.borrow_and_update();
@@ -79,5 +87,37 @@ impl InterruptRx {
         } else {
             std::future::pending::<()>().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_fork_observes_the_same_trip() {
+        let (interrupter, interrupt) = Interrupt::channel();
+        let mut root = interrupt.take_receiver().unwrap();
+        root.baseline();
+        let mut first = root.fork();
+        let mut second = root.fork();
+
+        interrupter.trip();
+
+        assert!(first.tripped());
+        assert!(second.tripped());
+        assert!(root.tripped());
+    }
+
+    #[test]
+    fn a_pending_trip_is_not_lost_when_forking() {
+        let (interrupter, interrupt) = Interrupt::channel();
+        let mut root = interrupt.take_receiver().unwrap();
+        root.baseline();
+        interrupter.trip();
+        let mut fork = root.fork();
+
+        assert!(fork.tripped());
+        assert!(root.tripped());
     }
 }

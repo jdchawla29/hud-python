@@ -1,6 +1,6 @@
 //! On-disk session store: transcript + conversation, for resume.
 //!
-//! Sessions live under `~/.slate/sessions/<id>/`:
+//! Sessions live under `$DAS_HOME/sessions/<id>/` or `~/.das/sessions/<id>/`:
 //! - `meta.json`    — id, created, work_dir, models, task
 //! - `messages.json`— the orchestrator conversation (rewritten each turn)
 //! - `events.jsonl` — the UI event transcript (appended live), for replay
@@ -11,6 +11,8 @@
 //! conclusions already live in the conversation as episodes.
 
 use crate::agent::UiEvent;
+use crate::harness::WorkerHarnessKind;
+use crate::orchestrator::OrchestratorKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Write;
@@ -20,10 +22,16 @@ use std::sync::Mutex;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub id: String,
+    pub project_id: i64,
+    pub workspace_id: i64,
     pub created: String,
     pub work_dir: String,
-    pub orch_model: String,
-    pub worker_model: String,
+    #[serde(default)]
+    pub orch_harness: OrchestratorKind,
+    pub orch_model: Option<String>,
+    pub worker_harness: WorkerHarnessKind,
+    pub worker_model: Option<String>,
+    pub codex_socket: Option<PathBuf>,
     pub task: String,
 }
 
@@ -35,11 +43,8 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
-    fn root() -> PathBuf {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
-        home.join(".slate/sessions")
+    fn root() -> std::io::Result<PathBuf> {
+        Ok(crate::paths::home()?.join("sessions"))
     }
 
     /// A fresh short session id.
@@ -49,7 +54,7 @@ impl SessionStore {
 
     /// Create (or truncate) the store for a new session and write its meta.
     pub fn create(meta: &SessionMeta) -> std::io::Result<SessionStore> {
-        let dir = Self::root().join(&meta.id);
+        let dir = Self::root()?.join(&meta.id);
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join("meta.json"), serde_json::to_vec_pretty(meta)?)?;
         let events = std::fs::OpenOptions::new()
@@ -65,11 +70,12 @@ impl SessionStore {
 
     /// Reopen an existing session for appending (resume).
     pub fn open(id: &str) -> std::io::Result<SessionStore> {
-        let dir = Self::root().join(id);
+        let root = Self::root()?;
+        let dir = root.join(id);
         if !dir.join("meta.json").exists() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                format!("no session {id:?} under {}", Self::root().display()),
+                format!("no session {id:?} under {}", root.display()),
             ));
         }
         let events = std::fs::OpenOptions::new()
@@ -88,7 +94,7 @@ impl SessionStore {
     }
 
     pub fn load_meta(id: &str) -> std::io::Result<SessionMeta> {
-        let path = Self::root().join(id).join("meta.json");
+        let path = Self::root()?.join(id).join("meta.json");
         let bytes = std::fs::read(path)?;
         Ok(serde_json::from_slice(&bytes)?)
     }
@@ -132,20 +138,63 @@ impl SessionStore {
         }
     }
 
-    /// List saved session ids, newest first by directory mtime.
-    pub fn list() -> Vec<SessionMeta> {
-        let Ok(entries) = std::fs::read_dir(Self::root()) else {
-            return Vec::new();
+    pub fn list_for_workspace(workspace_id: i64) -> std::io::Result<Vec<SessionMeta>> {
+        let root = Self::root()?;
+        let entries = match std::fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
         };
-        let mut metas: Vec<(std::time::SystemTime, SessionMeta)> = entries
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let modified = entry.metadata().ok()?.modified().ok()?;
-                let id = entry.file_name().to_string_lossy().into_owned();
-                Some((modified, Self::load_meta(&id).ok()?))
-            })
-            .collect();
+        let mut metas = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            let modified = entry.metadata()?.modified()?;
+            let id = entry.file_name().to_string_lossy().into_owned();
+            let meta = Self::load_meta(&id)?;
+            if meta.workspace_id == workspace_id {
+                metas.push((modified, meta));
+            }
+        }
         metas.sort_by(|a, b| b.0.cmp(&a.0));
-        metas.into_iter().map(|(_, meta)| meta).collect()
+        Ok(metas.into_iter().map(|(_, meta)| meta).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_records_project_and_workspace_ownership() {
+        let meta: SessionMeta = serde_json::from_value(serde_json::json!({
+            "id": "session",
+            "project_id": 7,
+            "workspace_id": 11,
+            "created": "2026-08-06T00:00:00Z",
+            "work_dir": "/tmp/workspace",
+            "orch_model": "orchestrator",
+            "worker_harness": "codex",
+            "worker_model": null,
+            "codex_socket": null,
+            "task": "inspect"
+        }))
+        .unwrap();
+
+        assert_eq!(meta.project_id, 7);
+        assert_eq!(meta.workspace_id, 11);
+        assert_eq!(meta.orch_harness, OrchestratorKind::Gateway);
+        assert_eq!(meta.orch_model.as_deref(), Some("orchestrator"));
+    }
+
+    #[test]
+    fn old_bash_events_default_missing_output() {
+        let event: UiEvent =
+            serde_json::from_str(r#"{"Bash":{"thread":"worker","command":"pwd","exit_status":0}}"#)
+                .unwrap();
+
+        let UiEvent::Bash { output, .. } = event else {
+            panic!("expected bash event");
+        };
+        assert!(output.is_empty());
     }
 }

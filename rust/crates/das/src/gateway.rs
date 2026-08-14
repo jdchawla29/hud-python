@@ -5,8 +5,8 @@
 //! settings.hud_gateway_url)` uses. Message content is kept as raw JSON blocks
 //! so assistant turns replay verbatim into the next request.
 
-use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use crate::orchestrator::ChatResponse;
+use serde_json::{json, Value};
 use std::time::Duration;
 
 pub const DEFAULT_GATEWAY_URL: &str = "https://inference.beta.hud.ai";
@@ -17,55 +17,6 @@ pub enum GatewayError {
     Http(#[from] reqwest::Error),
     #[error("gateway returned {status}: {body}")]
     Api { status: u16, body: String },
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct Usage {
-    #[serde(default)]
-    pub input_tokens: u64,
-    #[serde(default)]
-    pub output_tokens: u64,
-}
-
-/// One tool invocation requested by the model.
-#[derive(Debug, Clone)]
-pub struct ToolUse {
-    pub id: String,
-    pub name: String,
-    pub input: Map<String, Value>,
-}
-
-/// A model response: raw content blocks plus usage.
-#[derive(Debug, Clone)]
-pub struct ChatResponse {
-    pub content: Vec<Value>,
-    pub usage: Usage,
-}
-
-impl ChatResponse {
-    /// All text blocks joined, like the cookbook's `_text_of`.
-    pub fn text(&self) -> String {
-        self.content
-            .iter()
-            .filter(|b| b["type"] == "text")
-            .filter_map(|b| b["text"].as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string()
-    }
-
-    pub fn tool_uses(&self) -> Vec<ToolUse> {
-        self.content
-            .iter()
-            .filter(|b| b["type"] == "tool_use")
-            .map(|b| ToolUse {
-                id: b["id"].as_str().unwrap_or_default().to_string(),
-                name: b["name"].as_str().unwrap_or_default().to_string(),
-                input: b["input"].as_object().cloned().unwrap_or_default(),
-            })
-            .collect()
-    }
 }
 
 #[derive(Clone)]

@@ -1,20 +1,21 @@
-//! Wires the slate agent into the HUD rollout engine and exposes an
+//! Wires the DAS agent into the HUD rollout engine and exposes an
 //! interactive session handle (events + input + interrupt + outcome).
 
-use crate::agent::{SlateAgent, SlateConfig, UiEvent};
-use crate::gateway::Gateway;
+use crate::agent::{DasAgent, DasConfig, UiEvent};
+use crate::harness::WorkerHarness;
 use crate::interrupt::{Interrupt, Interrupter};
+use crate::orchestrator::Orchestrator;
 use crate::session::SessionStore;
-use hud_eval::{rollout, DockerRuntime, LocalRuntime, Provider, RolloutOptions, TaskRow};
+use hud_eval::{rollout, LocalRuntime, Provider, RolloutOptions, TaskRow};
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
-const ENV_SOURCE: &str = include_str!("../slate_env.py");
+const ENV_SOURCE: &str = include_str!("../das_env.py");
 
-/// Final result of one slate session.
+/// Final result of one DAS session.
 #[derive(Debug, Clone)]
 pub struct RunOutcome {
     pub reward: f64,
@@ -34,7 +35,7 @@ impl RunOutcome {
     }
 }
 
-/// A running slate session: live events, the input channel for follow-up
+/// A running DAS session: live events, the input channel for follow-up
 /// messages, the interrupt trigger, and the eventual outcome.
 pub struct SessionHandle {
     pub events: UnboundedReceiver<UiEvent>,
@@ -43,22 +44,17 @@ pub struct SessionHandle {
     pub outcome: oneshot::Receiver<RunOutcome>,
 }
 
-/// Where the workspace env runs.
 #[derive(Clone)]
-pub enum Placement {
-    /// `python -m hud.environment.server` on the given `--work-dir`.
-    Local {
-        hud_python: PathBuf,
-        work_dir: PathBuf,
-    },
-    /// A self-contained container image serving a `slate-coding` env.
-    Docker { image: String },
+pub struct Placement {
+    pub hud_python: PathBuf,
+    pub work_dir: PathBuf,
 }
 
 #[derive(Clone)]
 pub struct Launcher {
-    pub config: SlateConfig,
-    pub gateway: Gateway,
+    pub config: DasConfig,
+    pub orchestrator: Arc<dyn Orchestrator>,
+    pub worker_harness: Arc<dyn WorkerHarness>,
     pub placement: Placement,
     /// Prior conversation to continue (resume); empty for a fresh session.
     pub seed_messages: Vec<Value>,
@@ -80,9 +76,10 @@ impl Launcher {
         let store = self.store.clone();
         tokio::spawn(tee_events(raw_events_rx, events_tx, store));
 
-        let agent = SlateAgent {
+        let agent = DasAgent {
             config: self.config.clone(),
-            gateway: self.gateway.clone(),
+            orchestrator: Arc::clone(&self.orchestrator),
+            worker_harness: Arc::clone(&self.worker_harness),
             events: raw_events_tx,
             inbox: std::sync::Mutex::new(Some(input_rx)),
             interrupt,
@@ -132,49 +129,42 @@ async fn tee_events(
 
 impl Placement {
     fn provider(&self) -> Box<dyn Provider> {
-        match self {
-            Placement::Local {
-                hud_python,
-                work_dir,
-            } => {
-                let env_file = write_env_source();
-                Box::new(
-                    LocalRuntime::command([
-                        "uv".to_string(),
-                        "run".to_string(),
-                        "--project".to_string(),
-                        hud_python.to_string_lossy().into_owned(),
-                        "python".to_string(),
-                        "-m".to_string(),
-                        "hud.environment.server".to_string(),
-                        env_file.to_string_lossy().into_owned(),
-                    ])
-                    .env_var("SLATE_WORK_DIR", work_dir.to_string_lossy()),
-                )
-            }
-            Placement::Docker { image } => Box::new(DockerRuntime::new(image.clone())),
-        }
+        let env_file = write_env_source();
+        Box::new(
+            LocalRuntime::command([
+                "uv".to_string(),
+                "run".to_string(),
+                "--project".to_string(),
+                self.hud_python.to_string_lossy().into_owned(),
+                "python".to_string(),
+                "-m".to_string(),
+                "hud.environment.server".to_string(),
+                env_file.to_string_lossy().into_owned(),
+            ])
+            .env_var("DAS_WORK_DIR", self.work_dir.to_string_lossy()),
+        )
     }
 }
 
 fn task_row(task_description: &str) -> TaskRow {
     let mut args = Map::new();
     args.insert("task_description".to_string(), json!(task_description));
-    TaskRow::new("slate-coding", "coding_task").with_args(args)
+    TaskRow::new("das-coding", "coding_task").with_args(args)
 }
 
 /// Materialize the embedded env source to a stable per-process temp path.
 fn write_env_source() -> PathBuf {
-    let path = std::env::temp_dir().join(format!("slate-env-{}.py", std::process::id()));
+    let path = std::env::temp_dir().join(format!("das-env-{}.py", std::process::id()));
     std::fs::write(&path, ENV_SOURCE).expect("write env source to temp dir");
     path
 }
 
-/// Locate the hud-python checkout: `--hud-python` flag, else `$HUD_PYTHON_DIR`.
+/// Locate the hud-python checkout: `--hud-python` flag, `$HUD_PYTHON_DIR`,
+/// else this repo's root (the Rust workspace is embedded in the Python SDK).
 pub fn resolve_hud_python(flag: Option<PathBuf>) -> Result<PathBuf, String> {
     let path = flag
         .or_else(|| std::env::var_os("HUD_PYTHON_DIR").map(PathBuf::from))
-        .ok_or("hud-python checkout not found: pass --hud-python or set HUD_PYTHON_DIR")?;
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."));
     if !Path::new(&path).join("pyproject.toml").exists() {
         return Err(format!(
             "{} does not look like a hud-python checkout (no pyproject.toml)",

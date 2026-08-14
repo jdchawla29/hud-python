@@ -220,16 +220,13 @@ async fn agent_timeout_truncates_and_grades_partial() {
     assert_eq!(run.trace.status, Some(TraceStatus::Completed));
 }
 
-/// The whole engine against the reference Python SDK: `LocalRuntime` spawns
-/// `uv run python -m hud.environment.server`, reads the port announcement,
-/// and `rollout` drives the Python-served task to a graded run.
-/// Gated on `HUD_PYTHON_DIR`; skipped otherwise.
+/// The whole engine against the reference Python SDK (this repo's root
+/// project): `LocalRuntime` spawns `uv run python -m hud.environment.server`,
+/// reads the port announcement, and `rollout` drives the Python-served task
+/// to a graded run.
 #[tokio::test]
 async fn local_runtime_rollout_against_python_env() {
-    let Some(python_dir) = std::env::var_os("HUD_PYTHON_DIR") else {
-        eprintln!("skipping: set HUD_PYTHON_DIR to run Python interop tests");
-        return;
-    };
+    let python_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/interop/fixture_env.py");
 

@@ -1,11 +1,9 @@
 //! `filetracking/1` client against a real Python workspace env, reached
-//! through the control-port tunnel forwarder.
-//!
-//! Gated on `HUD_PYTHON_DIR` and the `ssh` feature (the fixture serves a
-//! tracked workspace):
+//! through the control-port tunnel forwarder. The Python SDK is this repo's
+//! root project; the fixture serves a tracked workspace.
 //!
 //! ```sh
-//! HUD_PYTHON_DIR=~/dev/hud-python cargo test -p hud-client --features ssh --test filetracking_interop
+//! cargo test -p hud-client --features ssh --test filetracking_interop
 //! ```
 
 #![cfg(feature = "ssh")]
@@ -20,10 +18,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 #[tokio::test]
 async fn diffs_track_workspace_edits() {
-    let Some(python_dir) = std::env::var_os("HUD_PYTHON_DIR").map(PathBuf::from) else {
-        eprintln!("skipping: set HUD_PYTHON_DIR to run Python interop tests");
-        return;
-    };
+    let python_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/interop/tracked_workspace_env.py");
     let work_dir = std::env::temp_dir().join(format!("hud-rs-ft-{}", std::process::id()));

@@ -1,11 +1,8 @@
 //! Cross-language interop against the reference Python SDK, both directions:
 //! Rust client ↔ Python server, and Python client ↔ Rust server.
 //!
-//! Gated on `HUD_PYTHON_DIR` (the hud-python checkout); skipped otherwise:
-//!
-//! ```sh
-//! HUD_PYTHON_DIR=~/dev/hud-python cargo test -p hud-client --test python_interop
-//! ```
+//! The Python SDK is this repo's root project (the Rust workspace lives under
+//! `rust/`), so the tests run against it directly via `uv run --project`.
 
 use hud_client::{connect, ConnectOptions};
 use hud_env::{template, Environment, Evaluation, Prompt};
@@ -18,8 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
-fn python_dir() -> Option<PathBuf> {
-    std::env::var_os("HUD_PYTHON_DIR").map(PathBuf::from)
+/// The hud-python project root: this repo.
+fn python_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
 }
 
 fn interop_dir() -> PathBuf {
@@ -32,10 +30,7 @@ fn obj(value: Value) -> Map<String, Value> {
 
 #[tokio::test]
 async fn rust_client_drives_python_server() {
-    let Some(python_dir) = python_dir() else {
-        eprintln!("skipping: set HUD_PYTHON_DIR to run Python interop tests");
-        return;
-    };
+    let python_dir = python_dir();
     let fixture = interop_dir().join("fixture_env.py");
 
     let mut child = tokio::process::Command::new("uv")
@@ -128,10 +123,7 @@ struct EchoArgs {
 
 #[tokio::test]
 async fn python_client_drives_rust_server() {
-    let Some(python_dir) = python_dir() else {
-        eprintln!("skipping: set HUD_PYTHON_DIR to run Python interop tests");
-        return;
-    };
+    let python_dir = python_dir();
 
     // The same env shape as the Python fixture, served from Rust.
     let mut env = Environment::new("echo-env").version("0.1.0");
