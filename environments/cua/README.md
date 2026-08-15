@@ -41,8 +41,8 @@ hud eval tasks.py claude --task-ids open-website-example -y --max-steps 100
 that serves the env + the in-container judge and attach the agent over `tcp://` (below):
 
 ```bash
-docker build -f Dockerfile.hud -t cua-template:dev .
-docker run -d --env-file .env -p 8765:8765 cua-template:dev
+docker build -f Dockerfile.hud -t hud-cua:dev .
+docker run -d --env-file .env -p 8765:8765 hud-cua:dev
 ```
 
 Point a computer-use agent at the served env. The multi-step task wants headroom (`--max-steps 100`);

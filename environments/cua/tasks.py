@@ -1,4 +1,4 @@
-"""Task definitions for the cua-template environment.
+"""Task definitions for the CUA environment.
 
 `hud eval tasks.py` and `hud sync tasks` collect the public `tasks` list. Add a task by
 calling `cua_task(...)`, setting a `.slug`, and adding it to the list. Verify a CUA env with a

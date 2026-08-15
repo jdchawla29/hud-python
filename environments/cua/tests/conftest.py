@@ -1,4 +1,4 @@
-"""Test fixtures for the cua-template env grader logic (offline, no desktop)."""
+"""Test fixtures for the CUA environment grader logic (offline, no desktop)."""
 
 import sys
 from pathlib import Path

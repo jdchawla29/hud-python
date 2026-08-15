@@ -1,4 +1,4 @@
-"""Offline tests for the cua-template grader composition.
+"""Offline tests for the CUA environment grader composition.
 
 These do NOT touch the virtual desktop (rfb is Linux-only); they drive the @env.template
 generator directly and exercise the BashGrader/LLM-judge/fallback paths with deterministic

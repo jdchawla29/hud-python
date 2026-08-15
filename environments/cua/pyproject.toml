@@ -21,7 +21,7 @@ target-version = "py311"
 line-length = 120
 
 [tool.hud]
-image = "cua-template:dev"
+image = "hud-cua:dev"
 
 [tool.ruff.lint]
 select = ["E", "F", "B", "I", "C4", "UP"]

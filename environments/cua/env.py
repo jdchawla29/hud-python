@@ -23,7 +23,7 @@ from hud.settings import settings
 
 logger = logging.getLogger(__name__)
 
-env = Environment(name="cua-template")  # literal name - `hud deploy` static-parses it
+env = Environment(name="cua")  # literal name - `hud deploy` static-parses it
 
 _HOST = "127.0.0.1"
 _VNC_PORT = 5900  # x11vnc serves the :1 display here (_start_desktop pins -rfbport 5900)
@@ -133,7 +133,7 @@ async def _up() -> None:
 async def _down() -> None:
     # We launched the desktop in @env.initialize, so tear it down (sudo forwards SIGTERM to the
     # dropped child). The container dies with it anyway; this matters for local subprocess runs.
-    logger.info("cua-template shutting down")
+    logger.info("cua environment shutting down")
     for proc in reversed(_desktop_procs):
         try:
             proc.terminate()
