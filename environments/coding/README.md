@@ -1,99 +1,75 @@
-# Coding Environment (HUD v6)
+# Coding Environment
 
-A coding environment: the agent gets a git repo over a sandboxed **`ssh` workspace** (the
-harness brings its own bash/file tools), and grading is diff-based — capture the agent's
-changes, reset to the pre-agent snapshot, re-apply the diff, bring in the hidden tests, run
-them. Generic tasks, SDLC workflow tasks, and SWE-bench Pro are flavors on this core.
+This environment gives the agent a git repository through an `ssh` workspace and grades its
+changes with hidden tests. `hud init` copies this directory as a complete environment project.
 
-The agent never sees the answer key. Task setup moves the repo's real `.git` — which may hold
-solution branches or the fix commit — into a vault outside the workspace and leaves a fresh
-single-commit repo: git works normally, but there is no history, no refs, and no remotes.
-Grading discards the agent's `.git`, restores the vault, and checks hidden tests out *after*
-the agent's diff. In images, the vault and instance assets live under `/hud` (root, mode 700)
-and agent shells drop to a non-root uid via `setpriv`.
+## Run the example task
 
-This directory is a self-contained uv project — run every command below from it (`hud init`
-hands you a copy of it as your own environment package).
-
-## Layout
-
-- `env.py` — the environment: workspace wiring plus the three task templates.
-- `coding/repo.py` — the shared repo lifecycle: vault, snapshot, diff capture, reset, apply.
-- `coding/github.py` — mock GitHub for SDLC tasks: issue/PR store served as `github_*` tools.
-- `coding/swe_bench_pro.py` — the SWE-bench Pro grading pipeline.
-- `tasks.py` — sample generic and SDLC tasks.
-- `swe_tasks.py` — the SWE-bench Pro task source: fetches instances and builds their images
-  when run; task rows when imported.
-- `Dockerfile.hud` — the image definition for both flavors: `BASE` selects the generic
-  repo-clone head or a prebuilt instance image.
-
-## Generic tasks (`coding-task`)
-
-Point the env at a repo (`REPO_URL`; locally it clones per process, or bake it with
-`Dockerfile.hud`) and parameterize the template: a `base_ref` to start from, a `test_ref` whose
-`test_files` are the hidden tests (checked out from the vaulted history at grade time), and a
-`test_command` scored by exit code. Tasks follow the 3-branch convention — `{task}_baseline` /
-`{task}_test` / `{task}_golden`; `tasks.py` ships four sample bugs on
-[coding-template-sample](https://github.com/hud-evals/coding-template-sample):
+The included `flask-4992` task is the `pallets__flask-4992` instance from
+[SWE-bench Lite](https://huggingface.co/datasets/princeton-nlp/SWE-bench_Lite). Its repository
+baseline, hidden tests, and reference fix are included in `flask-4992.bundle`.
 
 ```bash
 uv sync
 hud set HUD_API_KEY=your-key-here
-hud eval tasks.py claude --task-ids sentry-fix -y --runtime local
+hud eval tasks.py claude --task-ids flask-4992 -y --runtime local
 ```
 
-## SDLC tasks (`sdlc-task`)
+## How grading works
 
-The generic flavor plus workflow: the repo gets an `origin` remote (a bare mock-GitHub repo the
-agent pushes to) and `github_*` MCP tools seeded with the task's issues. The deliverable is a
-pushed branch with a pull request — grading checks the PR head out of the remote, brings in the
-hidden tests, runs the test command (weight 0.8), and scores the PR itself (0.2): a structural
-title/body check by default, or `pr_rubric` judged by `LLMJudgeGrader` when provided. See the
-`sentry-fix-pr` sample in `tasks.py`:
+1. Setup checks out `base_ref`, snapshots the prepared repository, and moves its original
+   `.git` directory outside the workspace.
+2. The agent receives a fresh repository containing one baseline commit. The original history,
+   hidden-test refs, and reference fix are not reachable from the workspace.
+3. Grading discards the agent-controlled Git metadata, restores the original history, and captures
+   the final worktree against the setup snapshot.
+4. The submitted diff is reapplied, then `test_files` are checked out from `test_ref`.
+5. `test_script` writes JUnit XML to `{junit_path}`. Only the configured fail-to-pass and
+   pass-to-pass test IDs contribute to the score.
 
-```bash
-hud eval tasks.py claude --task-ids sentry-fix-pr -y --runtime local
+The default score is the fraction of selected tests that pass. Set `use_binary_score=True` to
+require every selected test. Missing selected tests count as failures.
+
+```python
+from env import coding_task
+
+fix_parser = coding_task(
+    description="Fix the parser without breaking existing inputs.",
+    test_script="python -m pytest -q {test_files} --junitxml={junit_path}",
+    base_ref="origin/parser_baseline",
+    test_ref="origin/parser_test",
+    golden_ref="origin/parser_golden",
+    test_files=["test_parser.py"],
+    f2p_test_nodeids=["test_parser.TestParser.test_new_input"],
+    p2p_test_nodeids=["test_parser.TestParser.test_existing_input"],
+)
+fix_parser.slug = "fix-parser"
 ```
 
-## SWE-bench Pro tasks
+JUnit IDs are `classname.name`, matching the values written in the report. For pytest, inspect a
+generated report instead of copying pytest's slash-and-`::` collection syntax.
 
-Each of the 731 public [SWE-bench Pro](https://github.com/scaleapi/SWE-bench_Pro-os) instances
-ships a prebuilt image (`jefzda/sweap-images:<tag>`, `linux/amd64`) with the repo and toolchain
-baked in. Running `swe_tasks.py` fetches the dataset row plus the official
-`run_script.sh`/`parser.py` into `instances/<id>/` and builds `Dockerfile.hud` with the
-instance's image as `BASE`, so the image serves this env from inside. Grading replays the
-official evaluator: resolved iff every `fail_to_pass` **and** `pass_to_pass` test passes.
+## Adapt the environment
 
-```bash
-uv run swe_tasks.py instance_NodeBB__NodeBB-04998908ba6721d64eba79ae3b65a351dcfbc5b5-vnan
-hud eval swe_tasks.py claude --task-ids nodebb-04998908
-uv run swe_tasks.py <id>... --push registry.io/acme   # push for cloud runtimes
-```
+- Set `REPO_URL` to use another repository for local runs.
+- Build the bundled repository with `docker build -f Dockerfile.hud .`.
+- Replace the bundle and task refs when adapting the environment to another repository.
+- Install the repository's dependencies in `Dockerfile.hud` so grading does not depend on runtime
+  downloads.
+- Define task rows in `tasks.py`. Keep hidden tests and reference fixes outside the baseline
+  history exposed to the agent.
+
+The image runs agent shells as UID 1000. `/hud` contains the environment code, repository vault,
+and grading logs and is readable only by the environment process. The workspace requests network
+isolation when bubblewrap is available. The provided image does not install bubblewrap, so container
+runtimes must enforce any required egress policy. Non-root local runs require usable bubblewrap and
+fail closed without it.
 
 ## Tests
 
 ```bash
-uv run pytest tests/ -q --ignore=tests/test_integration.py   # offline + hermetic local e2e
-uv run pytest tests/test_integration.py -v                   # SWE-bench gold-patch check (Docker)
+uv run pytest tests/ -q
 ```
 
-`test_local_rollout.py` runs the generic and SDLC flavors end to end against a fixture 3-branch
-repo (no Docker or network): the golden ref grades 1.0 and the untouched baseline 0.0. The
-integration suite is the same check for built SWE-bench Pro instances.
-
-## Caveats
-
-- Public benchmarks are public: a networked agent could fetch solutions from GitHub. Disable
-  network egress at the runtime layer if that matters for your run.
-- Non-root local runs require bubblewrap. If it is unavailable, serving fails rather than
-  exposing vaulted answer-key refs to the agent process.
-- The uid wall needs `setpriv` (util-linux) in the image; the repo path comes from `REPO_DIR`
-  (`/app` in instance images).
-- The agent runs as uid 1000, so the baked repo must belong to it. The workspace only chowns
-  its own directory at start (O(1), keeps boot fast); the tree is owned where it's staged —
-  the generic build chowns `/app` in the clone step, and task setup re-chowns after root
-  mutates the worktree (checkout, vaulting).
-
-## Documentation
-
-See the [full docs](https://docs.hud.ai) for tasks, evaluation, and scaling.
+The suite covers repository isolation, trusted diff capture, prepared dependencies, hidden-test
+restoration, reference-fix validation, and partial and binary JUnit scoring.

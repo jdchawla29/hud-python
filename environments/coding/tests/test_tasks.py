@@ -1,48 +1,64 @@
-"""Task-row tests for both flavors: rows are well-formed and slugs readable."""
+"""Task-row tests for the bundled coding task."""
 
-import json
+import shlex
+import subprocess
 from pathlib import Path
 
-import swe_tasks
 import tasks
+from coding.grading import parse_junit, score_tests
 
-FIXTURE_ROW = json.loads((Path(__file__).parent / "fixtures" / "instance" / "instance.json").read_text("utf-8"))
-
-
-def test_generic_rows_parameterize_the_coding_task_template():
-    slugs = {task.slug for task in tasks.tasks}
-    assert slugs == {"sentry-fix", "notif-bug", "settings-v2", "webhook-bug", "sentry-fix-pr"}
-    for task in tasks.tasks:
-        assert task.env == "coding"
-        assert task.args["base_ref"].endswith("_baseline")
-        assert task.args["test_ref"].endswith("_test")
-        assert task.args["test_files"]
-
-    by_slug = {task.slug: task for task in tasks.tasks}
-    assert by_slug["sentry-fix"].id == "coding-task"
-    sdlc = by_slug["sentry-fix-pr"]
-    assert sdlc.id == "sdlc-task"
-    assert sdlc.args["issues"][0]["number"] == 42
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_swe_slug_is_repo_tail_plus_commit_prefix():
-    assert swe_tasks._slug(FIXTURE_ROW) == "widgets-00000000"
-    assert (
-        swe_tasks._slug(
-            {
-                "repo": "NodeBB/NodeBB",
-                "instance_id": "instance_NodeBB__NodeBB-04998908ba6721d64eba79ae3b65a351dcfbc5b5-vnan",
-            }
+def test_rows_parameterize_the_coding_task_template():
+    [task] = tasks.tasks
+    assert task.slug == "flask-4992"
+    assert task.env == tasks.env.name
+    assert task.id == "coding-task"
+    assert task.args["base_ref"] == "origin/flask_4992_baseline"
+    assert task.args["test_ref"] == "origin/flask_4992_test"
+    assert task.args["golden_ref"] == "origin/flask_4992_golden"
+    assert task.args["test_files"]
+    assert "{junit_path}" in task.args["test_script"]
+    assert task.args["f2p_test_nodeids"]
+    assert task.args["p2p_test_nodeids"]
+    assert task.args["use_binary_score"] is True
+    assert task.args["description"].startswith("Add a file mode parameter to flask.Config.from_file()")
+    assert 'mode="b"' in task.args["description"]
+
+
+def test_bundled_task_baseline_fails_and_golden_ref_passes(tmp_path: Path):
+    [task] = tasks.tasks
+
+    for ref, expected_exit_code, expected_reward in (
+        (task.args["base_ref"], 1, 0.0),
+        (task.args["golden_ref"], 0, 1.0),
+    ):
+        repo = tmp_path / ref.rsplit("/", 1)[-1]
+        subprocess.run(
+            ["git", "clone", "-q", str(PROJECT_ROOT / "flask-4992.bundle"), str(repo)],
+            check=True,
         )
-        == "nodebb-04998908"
-    )
+        subprocess.run(["git", "checkout", "-qf", ref], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "checkout", task.args["test_ref"], "--", *task.args["test_files"]],
+            cwd=repo,
+            check=True,
+        )
 
+        junit_path = tmp_path / f"{repo.name}.xml"
+        command = (
+            task.args["test_script"]
+            .replace("{test_files}", shlex.join(task.args["test_files"]))
+            .replace("{junit_path}", shlex.quote(str(junit_path)))
+        )
+        completed = subprocess.run(["bash", "-lc", command], cwd=repo, check=False)
+        assert completed.returncode == expected_exit_code
 
-def test_swe_rows_are_wellformed():
-    """Whatever `swe_tasks.py` has fetched loads as valid, uniquely-slugged rows."""
-    slugs = [task.slug for task in swe_tasks.tasks]
-    assert len(set(slugs)) == len(slugs)
-    for task in swe_tasks.tasks:
-        assert task.env == "coding"
-        assert task.id.startswith("instance_")
-        assert task.columns and task.columns["repo"]
+        result = score_tests(
+            parse_junit(junit_path),
+            task.args["f2p_test_nodeids"],
+            task.args["p2p_test_nodeids"],
+            task.args["use_binary_score"],
+        )
+        assert result.reward == expected_reward

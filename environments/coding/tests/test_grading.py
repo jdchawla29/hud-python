@@ -1,74 +1,86 @@
-"""Offline tests for the SWE-bench Pro flavor's pure pieces: the resolution
-criterion, dataset field parsing, and patch sanitization."""
+"""Tests for JUnit scoring and diff-based grading primitives."""
 
-import json
 from pathlib import Path
 
 import pytest
 
 from coding import repo as repo_lib
-from coding.swe_bench_pro import score, str_list, strip_binary_hunks
-
-INSTANCE = json.loads((Path(__file__).parent / "fixtures" / "instance" / "instance.json").read_text("utf-8"))
-
-F2P = [
-    "tests/test_widgets.py | test_widgets_work",
-    "tests/test_widgets.py | test_widgets_don't_break",
-]
-P2P = ["tests/test_widgets.py | test_existing_behavior"]
+from coding.grading import JUnitCase, parse_junit, score_tests
 
 
-def _reported(names, status="PASSED"):
-    return [{"name": name, "status": status} for name in names]
+def test_junit_scoring_tracks_fail_to_pass_and_pass_to_pass(tmp_path: Path):
+    report = tmp_path / "junit.xml"
+    report.write_text(
+        """<?xml version="1.0"?>
+<testsuite tests="3" failures="1">
+  <testcase classname="tests.test_widget" name="test_fixed">
+    <failure message="still broken" />
+  </testcase>
+  <testcase classname="tests.test_widget" name="test_regression" />
+  <testcase classname="tests.test_widget" name="test_unselected" />
+</testsuite>
+""",
+        encoding="utf-8",
+    )
+
+    result = score_tests(
+        parse_junit(report),
+        ["tests.test_widget::test_fixed"],
+        ["tests.test_widget.test_regression"],
+        use_binary_score=False,
+    )
+
+    assert result.reward == 0.5
+    assert result.info["f2p_passed"] == 0
+    assert result.info["p2p_passed"] == 1
+    assert result.info["total"] == 2
 
 
-def test_resolved_when_all_required_tests_pass():
-    result = score(INSTANCE, _reported(F2P + P2P + ["extra | irrelevant_test"]))
-    assert result.reward == 1.0
-    assert result.content == "resolved"
+def test_binary_junit_scoring_requires_every_selected_test():
+    result = score_tests(
+        [
+            JUnitCase("tests.test_widget.test_fixed", passed=True, skipped=False),
+            JUnitCase("tests.test_widget.test_regression", passed=False, skipped=False),
+        ],
+        ["tests.test_widget.test_fixed"],
+        ["tests.test_widget.test_regression"],
+        use_binary_score=True,
+    )
 
-
-def test_unresolved_when_a_fail_to_pass_test_fails():
-    reported = _reported(F2P[:1] + P2P) + _reported(F2P[1:], status="FAILED")
-    result = score(INSTANCE, reported)
     assert result.reward == 0.0
-    by_name = {s.name: s.value for s in result.subscores}
-    assert by_name["fail_to_pass"] == 0.5
-    assert by_name["pass_to_pass"] == 1.0
-    assert F2P[1] in result.info["missing"]
 
 
-def test_unresolved_on_pass_to_pass_regression():
-    """Fixing the bug while breaking existing behavior is not resolved."""
-    result = score(INSTANCE, _reported(F2P) + _reported(P2P, status="ERROR"))
-    assert result.reward == 0.0
-    by_name = {s.name: s.value for s in result.subscores}
-    assert by_name["fail_to_pass"] == 1.0
-    assert by_name["pass_to_pass"] == 0.0
+def test_missing_selected_junit_test_counts_as_failure():
+    result = score_tests(
+        [JUnitCase("tests.test_widget.test_present", passed=True, skipped=False)],
+        ["tests.test_widget.test_missing"],
+        ["tests.test_widget.test_present"],
+        use_binary_score=False,
+    )
+
+    assert result.reward == 0.5
+    assert result.info["f2p_passed"] == 0
 
 
-def test_missing_report_scores_zero():
-    result = score(INSTANCE, [])
-    assert result.reward == 0.0
+def test_junit_scoring_rejects_empty_or_duplicate_ids():
+    case = JUnitCase("tests.test_widget.test_duplicate", passed=True, skipped=False)
+
+    with pytest.raises(ValueError, match="at least one"):
+        score_tests([case], [], [], use_binary_score=False)
+    with pytest.raises(ValueError, match="JUnit test case IDs"):
+        score_tests([case, case], None, None, use_binary_score=False)
 
 
-def test_str_list_parses_python_repr_fields():
-    """Rows store lists as Python reprs (the official evaluator uses eval)."""
-    assert str_list(INSTANCE["fail_to_pass"]) == F2P
-    assert str_list(INSTANCE["selected_test_files_to_run"]) == ["tests/test_widgets.py"]
-    with pytest.raises(ValueError):
-        str_list("'not a list'")
+def test_parse_junit_rejects_malformed_report(tmp_path: Path):
+    report = tmp_path / "junit.xml"
+    report.write_text("<testsuite>", encoding="utf-8")
 
-
-def test_strip_binary_hunks_drops_only_binary_sections():
-    text = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
-    binary = "diff --git a/img b/img\nBinary files a/img and b/img differ\n"
-    assert strip_binary_hunks(text + binary) == text
-    assert strip_binary_hunks("") == ""
+    with pytest.raises(ValueError, match="invalid JUnit XML"):
+        parse_junit(report)
 
 
 @pytest.mark.asyncio
-async def test_binary_agent_changes_survive_diff_round_trip(tmp_path):
+async def test_binary_agent_changes_survive_diff_round_trip(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
     await repo_lib.git(repo, "init", "-q", "-b", "main")

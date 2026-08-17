@@ -7,38 +7,25 @@ server-side with deterministic shell checks and an optional LLM judge.
 ## Layout
 
 ```
-env.py           Environment: @env.initialize launches the desktop (as `ubuntu`) as subprocesses
-                 + publishes the rfb capability; the cua_task grading template lives here too
+env.py           Environment: publishes the rfb capability and defines the cua_task template
 tasks.py         task definitions (prompt + graders + slug)
-Dockerfile.hud   desktop image (Xvfb · x11vnc · xfce4 · chromium) + v6 control channel (hud serve)
+supervisord.conf runs Xvfb, XFCE, Chromium, x11vnc, and the HUD server in one container
+Dockerfile.hud   installs the desktop and environment dependencies
 ```
 
-The desktop is launched by `env.py` (one code path for local `hud eval` and the packaged image) —
-there is no init system. In the image it drops to the unprivileged `ubuntu` user so the agent's
-on-screen terminal (uid 1000) can't read the `chmod 700` grading code; the control channel stays
-root and can.
+Supervisor runs the desktop as the unprivileged `ubuntu` user, so the on-screen terminal cannot
+read the grading code. The HUD control server remains root.
 
 ## Run
 
-Needs [uv](https://docs.astral.sh/uv/), Python 3.11/3.12, and the HUD CLI. The virtual desktop is
-`Xvfb` + `x11vnc` — **X11, so Linux-only**. macOS is Quartz/Cocoa with no local X server, so use
-Docker there.
+Needs [uv](https://docs.astral.sh/uv/), Docker, and the HUD CLI.
 
 ```bash
 uv sync
 cp .env.example .env          # HUD_API_KEY
 ```
 
-**Local, dockerless — Linux, fastest iteration.** `@env.initialize` spawns the desktop itself, so
-`hud eval` runs the whole env as a local child process, no Docker, no build:
-
-```bash
-sudo apt install -y xvfb x11vnc chromium xfce4   # the desktop the env spawns
-hud eval tasks.py claude --task-ids open-website-example -y --max-steps 100
-```
-
-**Docker — required on macOS, and the packaging/deploy path.** Build once, then run a container
-that serves the env + the in-container judge and attach the agent over `tcp://` (below):
+Build the image, start its HUD server, and attach the agent over `tcp://`:
 
 ```bash
 docker build -f Dockerfile.hud -t hud-cua:dev .
@@ -94,5 +81,6 @@ with a "duplicate slug" error.
 ## Tests
 
 ```bash
+uv sync --extra dev
 uv run pytest tests/ -q
 ```

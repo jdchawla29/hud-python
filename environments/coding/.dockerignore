@@ -1,8 +1,8 @@
-# The build context is this directory; keep it to what the images COPY, plus
-# the Dockerfile itself (remote builders read it from the context).
 *
 !Dockerfile.hud
+!pyproject.toml
+!uv.lock
 !env.py
 !coding
-!instances
+!flask-4992.bundle
 **/__pycache__

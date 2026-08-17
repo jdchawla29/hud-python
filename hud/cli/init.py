@@ -12,6 +12,7 @@ import httpx
 import typer
 
 from hud.utils.hud_console import HUDConsole
+from hud.utils.naming import normalize_environment_name
 
 from .presets import (
     DEFAULT_PRESET,
@@ -20,13 +21,7 @@ from .presets import (
     EnvironmentPreset,
     materialize_preset,
 )
-from .templates import DOCKERFILE_HUD, ENV_PY, PYPROJECT_TOML, TASKS_PY
-
-
-def _python_name(name: str) -> str:
-    """Normalize a package name into a Python-identifier-ish env name."""
-    name = name.replace("-", "_").replace(" ", "_")
-    return "".join(c if c.isalnum() or c == "_" else "_" for c in name)
+from .templates import DOCKERFILE_HUD, DOCKERIGNORE, ENV_PY, PYPROJECT_TOML, TASKS_PY
 
 
 def _resolve_preset(preset: str | None, hud_console: HUDConsole) -> EnvironmentPreset | None:
@@ -57,13 +52,15 @@ def _ensure_writable(target: Path, force: bool, hud_console: HUDConsole) -> None
         raise typer.Exit(1)
 
 
-def _write_local_scaffold(target: Path, env_name: str, hud_console: HUDConsole) -> None:
+def _write_local_scaffold(target: Path, name: str, hud_console: HUDConsole) -> None:
     """Write the bundled minimal env package into ``target``."""
+    env_name = normalize_environment_name(name)
     files = {
-        "pyproject.toml": PYPROJECT_TOML.format(name=env_name.replace("_", "-")),
+        "pyproject.toml": PYPROJECT_TOML.format(name=env_name),
         "env.py": ENV_PY.format(env_name=env_name),
         "tasks.py": TASKS_PY.format(env_name=env_name),
         "Dockerfile.hud": DOCKERFILE_HUD,
+        ".dockerignore": DOCKERIGNORE,
     }
     target.mkdir(parents=True, exist_ok=True)
     for filename, content in files.items():
@@ -126,6 +123,18 @@ def init_command(
         created = not target.exists()
         try:
             materialize_preset(chosen, target)
+            source_name = normalize_environment_name(chosen.source)
+            target_name = normalize_environment_name(target.name)
+            if source_name != target_name:
+                env_path = target / "env.py"
+                contents = env_path.read_text(encoding="utf-8")
+                declaration = f'Environment(name="{source_name}")'
+                if contents.count(declaration) != 1:
+                    raise ValueError(f"expected one {declaration} declaration in {env_path}")
+                env_path.write_text(
+                    contents.replace(declaration, f'Environment(name="{target_name}")'),
+                    encoding="utf-8",
+                )
         except (httpx.HTTPError, tarfile.TarError, ValueError, OSError) as exc:
             # Don't leave a half-written tree behind — it would trip the
             # non-empty-directory guard on the next run. Only remove a directory
@@ -136,7 +145,7 @@ def init_command(
             raise typer.Exit(1) from exc
         hud_console.status_item(f"environments/{chosen.source}", "✓")
     else:
-        _write_local_scaffold(target, _python_name(target.name), hud_console)
+        _write_local_scaffold(target, target.name, hud_console)
 
     hud_console.section_title("Next Steps")
     hud_console.info("")

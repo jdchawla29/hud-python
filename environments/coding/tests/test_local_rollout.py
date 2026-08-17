@@ -1,18 +1,9 @@
-"""Hermetic end-to-end validation of the generic flavor (no Docker, no network).
-
-Builds a tiny 3-branch fixture repo (``bug_baseline`` / ``bug_test`` /
-``bug_golden``), serves ``env.py`` on a local substrate cloned from it, and
-drives the full lifecycle with no agent edits:
-
-- ``validate_mode="golden"``: the reference fix grades to 1.0
-- no validate_mode: the untouched baseline grades to 0.0
-
-This is the 3-branch analog of the SWE-bench gold-patch sanity check, and it
-exercises the whole vault/diff/hidden-test pipeline through real git.
-"""
+"""Hermetic end-to-end validation of repository setup and grading."""
 
 import os
+import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -20,6 +11,7 @@ from hud import LocalRuntime, Run, connect
 from hud.environment import workspace as workspace_lib
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PYTEST_SCRIPT = f"{shlex.quote(sys.executable)} -m pytest -q {{test_files}} --junitxml={{junit_path}}"
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -53,7 +45,9 @@ def fixture_repo(tmp_path_factory) -> Path:
         "import widget\n\n\n"
         "class TestWidget(unittest.TestCase):\n"
         "    def test_not_broken(self):\n"
-        "        self.assertFalse(widget.BROKEN)\n"
+        "        self.assertFalse(widget.BROKEN)\n\n"
+        "    def test_existing_behavior(self):\n"
+        "        self.assertTrue(hasattr(widget, 'BROKEN'))\n"
     )
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "hidden tests")
@@ -66,60 +60,37 @@ def fixture_repo(tmp_path_factory) -> Path:
     return repo
 
 
-async def _run_task(fixture_repo: Path, task) -> float:
-    # The served subprocess inherits the environment; point it at the fixture.
-    os.environ["REPO_URL"] = str(fixture_repo)
-    runtime = LocalRuntime(str(PROJECT_ROOT / "env.py"))
-    async with runtime(task) as addr, connect(addr) as client:
-        async with Run(client, task.id, task.args) as run:
-            pass  # no agent work: setup on start, grading on exit
-    return run.reward
-
-
 def _coding_task(validate_mode: str | None):
     from env import coding_task
 
     return coding_task(
         description="Fix the widget.",
-        test_command='test -n "${HOME}" && python3 -m unittest {test_files}',
+        test_script=f'test -n "${{HOME}}" && {PYTEST_SCRIPT}',
         base_ref="origin/bug_baseline",
         test_ref="origin/bug_test",
         test_files=["test_widget.py"],
         golden_ref="origin/bug_golden",
+        f2p_test_nodeids=["test_widget.TestWidget.test_not_broken"],
+        p2p_test_nodeids=["test_widget.TestWidget.test_existing_behavior"],
         validate_mode=validate_mode,
     )
 
 
-def _sdlc_task(validate_mode: str | None):
-    from env import sdlc_task
-
-    return sdlc_task(
-        description="Issue #1 reports a broken widget. Fix it and open a PR.",
-        test_command='test -n "${HOME}" && python3 -m unittest {test_files}',
-        base_ref="origin/bug_baseline",
-        test_ref="origin/bug_test",
-        test_files=["test_widget.py"],
-        golden_ref="origin/bug_golden",
-        issues=[{"number": 1, "title": "Widget broken", "body": "BROKEN should be False."}],
-        validate_mode=validate_mode,
-    )
+async def _run_task(fixture_repo: Path, task) -> float:
+    os.environ["REPO_URL"] = str(fixture_repo)
+    runtime = LocalRuntime(str(PROJECT_ROOT / "env.py"))
+    async with runtime(task) as addr, connect(addr) as client:
+        async with Run(client, task.id, task.args) as run:
+            pass
+    return run.reward
 
 
 async def test_golden_ref_scores_one(fixture_repo, isolated_workspace):
     assert await _run_task(fixture_repo, _coding_task("golden")) == 1.0
 
 
-async def test_untouched_baseline_scores_zero(fixture_repo, isolated_workspace):
-    assert await _run_task(fixture_repo, _coding_task(None)) == 0.0
-
-
-async def test_sdlc_golden_pr_scores_one(fixture_repo, isolated_workspace):
-    """Golden validation of the full PR workflow: pushed branch + opened PR."""
-    assert await _run_task(fixture_repo, _sdlc_task("golden")) == 1.0
-
-
-async def test_sdlc_no_pull_request_scores_zero(fixture_repo, isolated_workspace):
-    assert await _run_task(fixture_repo, _sdlc_task(None)) == 0.0
+async def test_untouched_baseline_gets_only_regression_credit(fixture_repo, isolated_workspace):
+    assert await _run_task(fixture_repo, _coding_task(None)) == 0.5
 
 
 async def test_local_runtime_refuses_unisolated_non_root_workspace(
@@ -136,7 +107,41 @@ async def test_local_runtime_refuses_unisolated_non_root_workspace(
             pass
 
 
-async def test_sdlc_grades_pushed_head_with_prepared_dependencies(tmp_path, monkeypatch):
+async def test_grading_discards_agent_git_config_before_capturing_diff(
+    fixture_repo,
+    tmp_path,
+    monkeypatch,
+):
+    import env as coding_env
+
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "clone", "-q", str(fixture_repo), str(repo)], check=True)
+    monkeypatch.setattr(coding_env, "REPO_DIR", repo)
+    monkeypatch.setattr(coding_env, "VAULT_DIR", tmp_path / "vault")
+    monkeypatch.setattr(coding_env, "LOGS_DIR", tmp_path / "logs")
+
+    task = coding_env.coding_task.func(
+        description="Fix the widget.",
+        test_script=PYTEST_SCRIPT,
+        base_ref="origin/bug_baseline",
+        test_ref="origin/bug_test",
+        test_files=["test_widget.py"],
+        f2p_test_nodeids=["test_widget.TestWidget.test_not_broken"],
+        p2p_test_nodeids=["test_widget.TestWidget.test_existing_behavior"],
+    )
+    await task.asend(None)
+
+    marker = tmp_path / "agent-filter-ran"
+    _git(repo, "config", "filter.agent.clean", f"touch {shlex.quote(str(marker))}; cat")
+    (repo / ".gitattributes").write_text("* filter=agent\n")
+
+    result = await task.asend("done")
+
+    assert result.reward == 0.5
+    assert not marker.exists()
+
+
+async def test_grading_preserves_prepared_dependencies(tmp_path, monkeypatch):
     import env as coding_env
 
     repo = tmp_path / "repo"
@@ -158,6 +163,12 @@ async def test_sdlc_grades_pushed_head_with_prepared_dependencies(tmp_path, monk
     )
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "hidden tests")
+
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "checkout", "-qb", "bug_golden")
+    (repo / "widget.py").write_text("BROKEN = False\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "reference fix")
     _git(repo, "checkout", "-q", "bug_baseline")
 
     prepared = repo / ".prepared" / "dependency"
@@ -167,29 +178,18 @@ async def test_sdlc_grades_pushed_head_with_prepared_dependencies(tmp_path, monk
     monkeypatch.setattr(coding_env, "REPO_DIR", repo)
     monkeypatch.setattr(coding_env, "VAULT_DIR", tmp_path / "vault")
     monkeypatch.setattr(coding_env, "LOGS_DIR", tmp_path / "logs")
-    monkeypatch.setattr(coding_env, "REMOTE_DIR", tmp_path / "remote" / "project.git")
 
-    task = coding_env.sdlc_task.func(
-        description="Fix the widget and open a pull request.",
-        test_command="test -f .prepared/dependency && awk 'BEGIN { exit 0 }' && python3 -m unittest {test_files}",
+    task = coding_env.coding_task.func(
+        description="Fix the widget.",
+        test_script=f"test -f .prepared/dependency && {PYTEST_SCRIPT}",
         base_ref="bug_baseline",
         test_ref="bug_test",
         test_files=["test_widget.py"],
+        golden_ref="bug_golden",
+        f2p_test_nodeids=["test_widget.TestWidget.test_not_broken"],
+        validate_mode="golden",
     )
     await task.asend(None)
-
-    _git(repo, "checkout", "-qb", "fix-widget")
-    (repo / "widget.py").write_text("BROKEN = False\n")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-qm", "fix widget")
-    _git(repo, "push", "-q", "-u", "origin", "fix-widget")
-    coding_env._github.create_pull_request(
-        "Fix widget",
-        "Makes the widget work.",
-        head="fix-widget",
-        base="main",
-    )
-
     result = await task.asend("done")
 
     assert result.reward == 1.0

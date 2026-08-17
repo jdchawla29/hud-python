@@ -8,7 +8,8 @@ The multi-step research task wants more steps:
     hud eval tasks.py claude --task-ids shannon-multistep-research -y --max-steps 100
 """
 
-from env import cua_task, env  # noqa: F401  (re-export env for `hud eval tasks.py`)
+from env import cua_task
+from env import env as env
 
 # Navigate to Wikipedia and read the tagline - LLM-judge grading
 _open_website = cua_task(

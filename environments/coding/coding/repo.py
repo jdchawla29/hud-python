@@ -1,7 +1,7 @@
 """Git-history vaulting and diff-based grading primitives.
 
 The repo's real ``.git`` may contain the answer key — solution branches, the
-fix commit, the hidden tests. Every task flavor shares this lifecycle:
+fix commit, and the hidden tests. The environment uses this lifecycle:
 
 - setup (:func:`vault_history`): snapshot the pre-agent worktree into the
   real history, move ``.git`` into a vault outside the workspace, and leave a
@@ -21,7 +21,6 @@ artifacts survive into grading.
 from __future__ import annotations
 
 import asyncio
-import os
 import shutil
 from pathlib import Path
 
@@ -73,11 +72,6 @@ async def vault_history(repo: Path, vault: Path) -> None:
     if (vault / "git").exists():
         raise RuntimeError(f"vault {vault} already holds a history: one task per substrate")
 
-    if hasattr(os, "geteuid") and os.geteuid() == 0:
-        # Grade-time git runs as root on the (chowned) agent-owned repo; git
-        # honors safe.directory only from system/global config, never from -c.
-        await run("git", "config", "--global", "--add", "safe.directory", str(repo), cwd=Path("/"))
-
     _append_git_exclude(repo / ".git")
     await git(repo, "add", "-A")
     await git(repo, "commit", "-q", "--allow-empty", "-m", "hud: pre-agent snapshot")
@@ -91,38 +85,6 @@ async def vault_history(repo: Path, vault: Path) -> None:
     _append_git_exclude(repo / ".git")
     await git(repo, "add", "-A")
     await git(repo, "commit", "-q", "--allow-empty", "-m", "baseline")
-
-
-async def create_remote(repo: Path, remote: Path, ref: str, *, branch: str = "main") -> None:
-    """A bare "GitHub" remote holding *ref*'s history as *branch*.
-
-    Pushing a single ref publishes only its ancestry — sibling answer-key
-    branches (hidden tests, golden fix) stay unreachable, while the agent
-    still gets realistic past history to work with.
-    """
-    remote.parent.mkdir(parents=True, exist_ok=True)
-    await git(remote.parent, "init", "-q", "--bare", "-b", branch, str(remote))
-    await git(repo, "push", "-q", str(remote), f"{ref}:refs/heads/{branch}")
-
-
-async def attach_to_remote(repo: Path, remote: Path, *, branch: str = "main") -> None:
-    """Point the agent's fresh repo at the remote, sharing its (sanitized) history.
-
-    Called after :func:`vault_history`: the throwaway single-commit repo is
-    replaced by the remote's clone state — same worktree, but with ``origin``
-    configured and history the agent can branch from and push back to.
-    """
-    shutil.rmtree(repo / ".git")
-    await git(repo, "init", "-q", "-b", branch, ".")
-    _append_git_exclude(repo / ".git")
-    await git(repo, "remote", "add", "origin", str(remote))
-    await git(repo, "fetch", "-q", "origin")
-    # Adopt the remote's history without a checkout: the worktree already
-    # matches (plus untracked build artifacts a checkout would refuse to
-    # cross), so point the branch at origin and sync only the index.
-    await git(repo, "update-ref", f"refs/heads/{branch}", f"refs/remotes/origin/{branch}")
-    await git(repo, "reset", "-q")
-    await git(repo, "branch", "-q", f"--set-upstream-to=origin/{branch}", branch)
 
 
 async def restore_history(repo: Path, vault: Path) -> str:

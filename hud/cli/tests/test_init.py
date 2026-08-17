@@ -26,6 +26,7 @@ def _fake_materialize(record: dict[str, object]):
         record["target"] = target
         target.mkdir(parents=True, exist_ok=True)
         (target / "README.md").write_text("# example environment")
+        (target / "env.py").write_text(f'env = Environment(name="{preset.id}")\n')
 
     return materialize
 
@@ -52,6 +53,7 @@ def test_init_uses_coding_example_by_default(
     assert (target / "README.md").read_text() == "# example environment"
     assert record["target"] == target
     assert record["preset"] == PRESETS_BY_ID["coding"]
+    assert 'Environment(name="my-cool-env")' in (target / "env.py").read_text()
 
 
 def test_init_blank_writes_runnable_scaffold_without_materializing_example(
@@ -70,10 +72,20 @@ def test_init_blank_writes_runnable_scaffold_without_materializing_example(
         "env.py",
         "tasks.py",
         "Dockerfile.hud",
+        ".dockerignore",
     }
     assert 'Environment(name="berry")' in (target / "env.py").read_text()
     assert "package = false" in (target / "pyproject.toml").read_text()
-    assert 'CMD ["uv", "run", "hud", "serve"' in (target / "Dockerfile.hud").read_text()
+    assert 'CMD ["/usr/local/venv/bin/hud", "serve"' in (target / "Dockerfile.hud").read_text()
+    assert ".venv" in (target / ".dockerignore").read_text()
+
+
+def test_init_blank_uses_normalized_project_name(tmp_path: Path) -> None:
+    init_command(name="My Cool_Env", directory=str(tmp_path), force=False, preset="blank")
+
+    target = tmp_path / "My Cool_Env"
+    assert 'Environment(name="my-cool-env")' in (target / "env.py").read_text()
+    assert 'name = "my-cool-env"' in (target / "pyproject.toml").read_text()
 
 
 def test_init_refuses_to_clobber_nonempty_directory(tmp_path: Path) -> None:
@@ -119,6 +131,7 @@ def test_init_name_overrides_example_source_directory(
     init_command(name="custom", directory=str(tmp_path), force=False, preset="cua")
 
     assert (tmp_path / "custom" / "README.md").exists()
+    assert 'Environment(name="custom")' in (tmp_path / "custom" / "env.py").read_text()
     assert not (tmp_path / "cua").exists()
 
 

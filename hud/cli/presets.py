@@ -27,7 +27,7 @@ ENVIRONMENT_PRESETS: tuple[EnvironmentPreset, ...] = (
     EnvironmentPreset(
         "coding",
         "Coding",
-        "A repository workspace with hidden-test grading and optional pull-request workflow.",
+        "A repository workspace with a SWE-bench task and hidden-test grading.",
         "coding",
     ),
     EnvironmentPreset(

@@ -1,31 +1,25 @@
-"""In-process wiring smoke tests (no Docker): the served surface is well-formed."""
+"""In-process wiring smoke tests for the served environment."""
 
-import json
-from pathlib import Path
+from unittest.mock import AsyncMock
 
+import pytest
+
+import env as coding_env
 from env import env
 
-FIXTURE_INSTANCE = json.loads((Path(__file__).parent / "fixtures" / "instance" / "instance.json").read_text("utf-8"))
 
-
-def test_env_identity():
-    assert env.name == "coding"
-
-
-def test_generic_template_registered():
+def test_coding_template_registered():
     assert "coding-task" in env.tasks
     assert env.tasks["coding-task"].manifest_entry()["id"] == "coding-task"
 
 
-def test_swe_bench_template_registered_when_instance_baked():
-    """conftest points INSTANCE_DIR at the fixture instance, as an instance image would."""
-    instance_id = FIXTURE_INSTANCE["instance_id"]
-    assert instance_id in env.tasks
-    assert env.tasks[instance_id].manifest_entry()["id"] == instance_id
+@pytest.mark.asyncio
+async def test_coding_task_uses_description_as_prompt(monkeypatch):
+    monkeypatch.setattr(coding_env, "_setup", AsyncMock())
+    task = coding_env.coding_task.func(
+        description="\nFix the bug.\n",
+        test_script="pytest --junitxml={junit_path}",
+    )
 
-
-def test_private_clone_does_not_persist_the_build_secret():
-    dockerfile = (Path(__file__).parent.parent / "Dockerfile.hud").read_text("utf-8")
-
-    assert 'git -c "http.extraHeader=Authorization: Basic ${auth}" clone "${REPO_URL}"' in dockerfile
-    assert "@${REPO_URL#https://}" not in dockerfile
+    assert await anext(task) == "Fix the bug."
+    await task.aclose()

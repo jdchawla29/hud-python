@@ -21,12 +21,6 @@ hud.lock.yaml
 .hud
 .hud_local/
 .hud_eval.toml
-.hud-images.json
-
-# SWE-bench Pro instance assets are fetched per-user (swe_tasks.py) and carry
-# the golden patches; only the empty .none dir (generic image builds) ships.
-instances/*
-!instances/.none/
 
 # The SDK repo ignores uv.lock at its root; this template pins its own so the
 # example resolves reproducibly.
