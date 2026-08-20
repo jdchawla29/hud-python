@@ -50,11 +50,16 @@ _model_alias = AliasChoices("model", "checkpoint_name")
 
 
 class AgentConfig(BaseModel):
+    timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    model_name: str = "Agent"
+    model: str = Field(default="unknown", validation_alias=_model_alias)
+
+
+class ToolAgentConfig(AgentConfig):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     auto_respond: bool = False
     max_steps: int = 10
-    timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     system_prompt: str | None = None
     citations_enabled: bool = False
     #: Conditions that end the rollout instead of being answered with an error
@@ -63,8 +68,6 @@ class AgentConfig(BaseModel):
     hosted_tools: list[HostedTool[object]] = Field(default_factory=list[HostedTool[object]])
     screenshot_encoding: ScreenshotEncoding = Field(default_factory=PngScreenshotEncoding)
 
-    model_name: str = "Agent"
-    model: str = Field(default="unknown", validation_alias=_model_alias)
     #: Provider client (AsyncAnthropic, AsyncOpenAI, genai.Client, ...). When unset,
     #: agents resolve one from settings (HUD gateway or provider API key).
     model_client: Any = None
@@ -75,7 +78,7 @@ class AgentConfig(BaseModel):
 # -----------------------------------------------------------------------------
 
 
-class ClaudeConfig(AgentConfig):
+class ClaudeConfig(ToolAgentConfig):
     model_name: str = "Claude"
     model: str = Field(default="claude-sonnet-4-6", validation_alias=_model_alias)
     max_tokens: int = 16384
@@ -88,7 +91,7 @@ class ClaudeConfig(AgentConfig):
 # -----------------------------------------------------------------------------
 
 
-class GeminiConfig(AgentConfig):
+class GeminiConfig(ToolAgentConfig):
     """Configuration for GeminiAgent."""
 
     model_name: str = "Gemini"
@@ -107,7 +110,7 @@ class GeminiConfig(AgentConfig):
 # -----------------------------------------------------------------------------
 
 
-class OpenAIConfig(AgentConfig):
+class OpenAIConfig(ToolAgentConfig):
     """Configuration for OpenAIAgent."""
 
     model_name: str = "OpenAI"
@@ -121,7 +124,7 @@ class OpenAIConfig(AgentConfig):
     parallel_tool_calls: bool | None = None
 
 
-class OpenAIChatConfig(AgentConfig):
+class OpenAIChatConfig(ToolAgentConfig):
     """Configuration for OpenAIChatAgent."""
 
     model_name: str = "OpenAI Chat"
@@ -146,10 +149,11 @@ class OpenAIChatConfig(AgentConfig):
 class ClaudeCLIConfig(AgentConfig):
     """Configuration for ClaudeCLIAgent (runs the ``claude`` CLI over SSH).
 
-    ``system_prompt`` is inherited from ``AgentConfig``. ``max_steps`` maps to the
-    CLI's ``--max-turns``; values <= 0 leave the turn budget to the CLI (unlimited).
+    ``max_steps`` maps to the CLI's ``--max-turns``; values <= 0 leave the turn
+    budget to the CLI (unlimited).
     """
 
+    system_prompt: str | None = None
     model_name: str = "Claude CLI"
     model: str = Field(default="claude-sonnet-5", validation_alias=_model_alias)
     use_hud_gateway: bool | None = None
@@ -179,9 +183,7 @@ class BrowserUseConfig(AgentConfig):
     """Configuration for BrowserUseAgent.
 
     Lives here (not in the agent module) so it can be imported and serialized
-    without the optional ``browser-use`` dependency installed. The ``auto_respond``
-    / ``system_prompt`` / ``hosted_tools`` fields from ``AgentConfig`` do not apply
-    — browser-use runs its own agent loop.
+    without the optional ``browser-use`` dependency installed.
     """
 
     model_name: str = "Browser Use"
