@@ -60,11 +60,13 @@ agent = ClaudeAgent(ClaudeConfig(model="claude-sonnet-4-5", max_steps=30))
 | `GeminiAgent` | `GeminiConfig` | `gemini-3-pro-preview` |
 | `OpenAIChatAgent` | `OpenAIChatConfig` | `gpt-5.4-mini` |
 | `ClaudeCLIAgent` | `ClaudeCLIConfig` | `claude-sonnet-5` |
+| `CodexCLIAgent` | `CodexCLIConfig` | `gpt-5.6-sol` |
 
 Each config lives in `hud.agents.types`. `OpenAIChatAgent` speaks the OpenAI Chat Completions API, so it
-points at any compatible server (vLLM, a local model) via `base_url`; `ClaudeCLIAgent` runs the `claude`
-CLI over an `ssh` capability, against the env's filesystem. SSH-only runs support POSIX and Windows
-workspaces; computer use over an `rfb` capability currently requires a POSIX workspace. Every knob
+points at any compatible server (vLLM, a local model) via `base_url`. `ClaudeCLIAgent` and
+`CodexCLIAgent` run their respective CLIs over an `ssh` capability against the env's filesystem and
+stream the CLI's structured events into the HUD trace. SSH-only runs support POSIX and Windows
+workspaces; Claude computer use over an `rfb` capability currently requires a POSIX workspace. Every knob
 (`model`, `max_steps`, `timeout_seconds`, `system_prompt`, `citations_enabled`, `stop_on`) lives on the
 config; `__call__(run)` takes only the run.
 
@@ -92,8 +94,8 @@ A model id maps to one of four gateway agent types (`AgentType`), each a provide
 | `gemini` | `GeminiAgent` |
 | `openai_compatible` | `OpenAIChatAgent` |
 
-For a provider key instead of the gateway, or for `ClaudeCLIAgent` (not a gateway shortcut), construct
-the agent directly.
+For a provider key instead of the gateway, or for a CLI agent (not a gateway shortcut), construct the
+agent directly.
 
 ## Agent
 
@@ -118,7 +120,7 @@ print(job.reward)
 ```
 
 **From the CLI**, `hud eval` takes a task source and an agent name (`claude`, `openai`, `gemini`,
-`openai_compatible`); see [running an eval](/v6/guides/running-an-eval) for the walkthrough and the
+`openai_compatible`, `claude_cli`, `codex_cli`); see [running an eval](/v6/guides/running-an-eval) for the walkthrough and the
 [CLI reference](/v6/reference/cli#hud-eval) for the full flag set.
 
 ## Bring your own harness
