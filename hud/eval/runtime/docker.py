@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from hud.utils.docker import docker as _docker
-from hud.utils.process import create_process_group_exec
 
 from .compose import ComposeConfig
 from .core import Runtime, RuntimeConfig, RuntimeSession
@@ -58,26 +57,6 @@ def _require_free_disk(output: str, storage_mb: int) -> None:
             f"DockerRuntime requires {storage_mb} MB of free disk; "
             f"the environment has {available_mb} MB"
         )
-
-
-async def _prepare_compose_project(compose: Path, max_wait: float | None) -> bool:
-    script = compose.parent / "build.sh"
-    if not script.is_file():
-        return False
-    process = await create_process_group_exec(
-        "sh",
-        str(script),
-        cwd=str(compose.parent),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    result = await process.complete(max_wait=max_wait)
-    if result.timed_out:
-        raise TimeoutError(f"Compose project build timed out after {max_wait:g} seconds")
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).decode("utf-8", "replace").strip()
-        raise RuntimeError(f"Compose project build failed: {detail}")
-    return True
 
 
 @asynccontextmanager
@@ -129,7 +108,6 @@ class DockerRuntime:
         if runtime_config is not None:
             config = config.with_overrides(RuntimeConfig.model_validate(runtime_config))
         self.runtime_config = config if config.model_dump(exclude_none=True) else None
-        self._compose_preparation_locks: dict[Path, asyncio.Lock] = {}
 
     @asynccontextmanager
     async def __call__(self, task: Task) -> AsyncIterator[Runtime]:
@@ -177,9 +155,6 @@ class DockerRuntime:
                         )
                     service_socket = parsed.path
             project = f"hud-{uuid.uuid4().hex[:12]}"
-            lock = self._compose_preparation_locks.setdefault(compose, asyncio.Lock())
-            async with lock:
-                prepared = await _prepare_compose_project(compose, startup_timeout)
             with compose_project.stage(
                 f"127.0.0.1::{self.port}",
                 port_service=port_service,
@@ -213,7 +188,7 @@ class DockerRuntime:
                         *command,
                         "up",
                         "--detach",
-                        "--no-build" if prepared else "--build",
+                        "--build",
                         "--remove-orphans",
                         deadline=startup_timeout,
                     )
