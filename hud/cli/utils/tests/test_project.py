@@ -3,23 +3,20 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 import pytest
-import typer
 
+from hud.cli.utils.config import DirectoryLink
 from hud.cli.utils.project import (
     Project,
-    ProjectNotFound,
+    ProjectNotWritable,
     ProjectSource,
     list_projects,
-    projects_not_enabled,
+    require_writable_placement,
     resolve_placement,
     resolve_project,
-    resolve_writable_placement,
 )
-from hud.cli.utils.source import EnvironmentSource
-from hud.utils.exceptions import HudRequestError
-from hud.utils.hud_console import HUDConsole
 from hud.utils.platform import PlatformClient
 
 if TYPE_CHECKING:
@@ -82,50 +79,14 @@ def test_list_reads_paginated_items(platform: PlatformClient) -> None:
     ]
 
 
-def test_projects_not_enabled_matches_only_the_feature_gate() -> None:
-    assert projects_not_enabled(
-        HudRequestError(
-            "forbidden",
-            status_code=403,
-            response_json={"error": "projects_not_enabled", "detail": "Projects disabled"},
-        )
-    )
-    assert projects_not_enabled(
-        HudRequestError(
-            "forbidden",
-            status_code=403,
-            response_json={"error": "forbidden", "detail": "Projects are not enabled"},
-        )
-    )
-    assert not projects_not_enabled(
-        HudRequestError(
-            "forbidden",
-            status_code=403,
-            response_json={"error": "forbidden", "detail": "Missing create scope"},
-        )
-    )
-
-
-def test_resolve_matches_a_normalized_name(platform: PlatformClient) -> None:
-    """A human-typed name resolves through the same normalization the platform applies."""
-    assert resolve_project(platform, "Browser Evals").id == _BROWSER_ID
-    assert resolve_project(platform, "browser-evals").id == _BROWSER_ID
+def test_project_names_require_explicit_selection(platform: PlatformClient) -> None:
+    with pytest.raises(ValueError, match="Project ID"):
+        resolve_project(platform, "browser-evals")
 
 
 def test_resolve_matches_an_id(platform: PlatformClient) -> None:
     assert resolve_project(platform, _BROWSER_ID).name == "browser-evals"
     assert resolve_project(platform, _BROWSER_ID.upper()).name == "browser-evals"
-
-
-def test_resolve_reports_the_visible_alternatives(platform: PlatformClient) -> None:
-    with pytest.raises(ProjectNotFound) as excinfo:
-        resolve_project(platform, "nope")
-
-    assert [p.name for p in excinfo.value.available] == [
-        "default",
-        "browser-evals",
-        "locked-down",
-    ]
 
 
 def test_flag_outranks_directory_config(
@@ -134,10 +95,9 @@ def test_flag_outranks_directory_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("hud.settings.settings.default_project", "locked-down")
-    source = EnvironmentSource.open(tmp_path)
-    source.save_config({"projectId": _DEFAULT_ID})
+    source = DirectoryLink(project_id=UUID(_DEFAULT_ID))
 
-    placement = resolve_placement(platform, source, flag="browser-evals")
+    placement = resolve_placement(platform, source, flag=_BROWSER_ID)
 
     assert placement.project is not None
     assert placement.project.id == _BROWSER_ID
@@ -151,8 +111,7 @@ def test_directory_config_applies_without_a_flag(
 ) -> None:
     """Placement is a property of the environment, not of who deploys it."""
     monkeypatch.setattr("hud.settings.settings.default_project", "default")
-    source = EnvironmentSource.open(tmp_path)
-    source.save_config({"projectId": _BROWSER_ID})
+    source = DirectoryLink(project_id=UUID(_BROWSER_ID))
 
     placement = resolve_placement(platform, source, flag=None)
 
@@ -166,9 +125,9 @@ def test_global_default_applies_to_an_unpinned_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("hud.settings.settings.default_project", "browser-evals")
+    monkeypatch.setattr("hud.settings.settings.default_project", _BROWSER_ID)
 
-    placement = resolve_placement(platform, EnvironmentSource.open(tmp_path), flag=None)
+    placement = resolve_placement(platform, DirectoryLink(), flag=None)
 
     assert placement.project is not None
     assert placement.project.id == _BROWSER_ID
@@ -183,7 +142,7 @@ def test_unconfigured_placement_sends_no_project_and_makes_no_call(
 ) -> None:
     """The zero-config path stays free: no project on the wire, no lookup."""
     _no_global_default(monkeypatch)
-    placement = resolve_placement(platform, EnvironmentSource.open(tmp_path), flag=None)
+    placement = resolve_placement(platform, DirectoryLink(), flag=None)
 
     assert placement.project_id is None
     assert placement.source is ProjectSource.TEAM_DEFAULT
@@ -197,18 +156,13 @@ def test_placement_resolves_a_project_the_caller_cannot_create_in(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _no_global_default(monkeypatch)
-    source = EnvironmentSource.open(tmp_path)
-    placement = resolve_placement(platform, source, flag="locked-down")
+    source = DirectoryLink()
+    placement = resolve_placement(platform, source, flag=_READONLY_ID)
     assert placement.project is not None
     assert placement.project.id == _READONLY_ID
 
-    with pytest.raises(typer.Exit):
-        resolve_writable_placement(
-            platform,
-            source,
-            flag="locked-down",
-            console=HUDConsole(),
-        )
+    with pytest.raises(ProjectNotWritable):
+        require_writable_placement(placement)
 
 
 def test_from_record_defaults_capabilities_to_read_only() -> None:
