@@ -22,6 +22,44 @@ runner = CliRunner()
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
+def test_model_commands_share_platform_transport(monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+
+    from hud.settings import settings
+
+    model_id = "00000000-0000-4000-a000-000000000001"
+    requests = []
+
+    def request(method, url, **kwargs):
+        requests.append((method, url, kwargs))
+        assert url.startswith("https://api.example/v2/")
+        assert kwargs["api_key"] == "test-key"
+        if urlsplit(url).path == "/v2/models/resolve":
+            assert parse_qs(urlsplit(url).query) == {"model": ["owner/model + version"]}
+            return {"id": model_id}
+        return [] if method == "GET" else {"id": model_id, "model_name": "forked"}
+
+    monkeypatch.setattr(settings, "api_key", "test-key")
+    monkeypatch.setattr(settings, "hud_api_url", "https://api.example/")
+    monkeypatch.setattr("hud.utils.platform.make_request_sync", request)
+    for command, extra, method, endpoint in [
+        ("checkpoints", [], "GET", f"/models/{model_id}/checkpoints"),
+        ("head", ["--set", "checkpoint"], "PUT", f"/models/{model_id}/head"),
+        ("fork", ["--name", "forked"], "POST", "/models/fork"),
+    ]:
+        requests.clear()
+        result = runner.invoke(app, ["models", command, "owner/model + version", *extra, "--json"])
+        assert result.exit_code == 0, result.output
+        assert len(requests) == 2
+        assert requests[-1][:2] == (method, f"https://api.example/v2{endpoint}")
+
+
+def test_client_rejects_non_object_args_before_connecting():
+    result = runner.invoke(app, ["client", "run", "solve", "--args", "[]", "--json"])
+    assert result.exit_code == ExitCode.USAGE
+    assert json.loads(result.stdout)["message"] == "--args must be a JSON object"
+
+
 def _plain(text: str) -> str:
     return _ANSI.sub("", text)
 
