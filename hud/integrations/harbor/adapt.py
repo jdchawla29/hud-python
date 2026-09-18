@@ -32,6 +32,8 @@ from hud.utils.naming import normalize_environment_name
 
 LOGGER = logging.getLogger(__name__)
 ASSETS = Path(__file__).parent
+LINUX_ISOLATION_ASSETS = Path(__file__).parents[2] / "environment/assets/linux-isolation"
+LINUX_ISOLATION_IMAGE = "hud-linux-isolation:0.12.0"
 HUD_ROOT = Path("/media/hud")
 IGNORED = shutil.ignore_patterns(
     "__pycache__",
@@ -674,6 +676,7 @@ def adapt(
         project = context / "compose-project"
         payload = project / ("main" if compose is not None else "hud")
         (payload / "packages").mkdir(parents=True)
+        shutil.copytree(LINUX_ISOLATION_ASSETS, payload / "linux-isolation")
         if compose is not None:
             (payload / "peer-image-configs").mkdir()
             (payload / "peer-image-configs" / ".keep").touch()
@@ -819,7 +822,9 @@ def adapt(
                 if separate
                 else ""
             )
-            combined += f"""{verifier_stages}
+            combined += f"""
+FROM hud-linux-isolation AS hud-linux-isolation
+{verifier_stages}
 FROM {base_stage} AS hud-runtime
 
 USER root
@@ -827,6 +832,8 @@ COPY --from=ghcr.io/astral-sh/uv:0.8.15 /uv /media/hud/bin/uv
 COPY --from=hud env.py install.sh config.json image-config.json /media/hud/
 COPY --from=hud verifier-image-config.json /media/hud/
 COPY --from=hud packages /media/hud/packages
+COPY --from=hud-linux-isolation / /media/hud/
+RUN /media/hud/bin/bwrap --version
 RUN sh /media/hud/install.sh {shlex.quote(requirement)}
 {verifier_copies}
 ENV HUD_SKIP_VERSION_CHECK=1
@@ -841,9 +848,16 @@ CMD ["/media/hud/venv/bin/hud", "serve", "/media/hud/env.py", "--host", "0.0.0.0
                 # dockerfile resolves relative to the context; additional
                 # context paths resolve relative to the project directory.
                 "dockerfile": "../Dockerfile",
-                "additional_contexts": {"hud": "./hud"},
+                "additional_contexts": {
+                    "hud": "./hud",
+                    "hud-linux-isolation": "service:hud-linux-isolation",
+                },
             }
-            services: dict[str, ComposeService] = {}
+            services: dict[str, ComposeService] = {
+                "hud-linux-isolation": ComposeService(
+                    image=LINUX_ISOLATION_IMAGE, build={"context": "./hud/linux-isolation"}
+                ).model_copy(update={"scale": 0})
+            }
             if separate:
                 shutil.copytree(source.path / "tests", project / "verifier", symlinks=True)
                 services["hud-verifier"] = ComposeService(
@@ -905,7 +919,12 @@ CMD ["/media/hud/venv/bin/hud", "serve", "/media/hud/env.py", "--host", "0.0.0.0
                     build=base_build,
                 ).model_copy(update={"scale": 0})
 
-            additional_contexts: dict[str, str] = {}
+            compose_project.services["hud-linux-isolation"] = ComposeService(
+                image=LINUX_ISOLATION_IMAGE, build={"context": "./main/linux-isolation"}
+            ).model_copy(update={"scale": 0})
+            additional_contexts: dict[str, str] = {
+                "hud-linux-isolation": "service:hud-linux-isolation"
+            }
             if base_build is not None:
                 additional_contexts["hud-base"] = "service:hud-base"
             if separate:

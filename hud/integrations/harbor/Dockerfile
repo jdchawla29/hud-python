@@ -1,6 +1,7 @@
 ARG BASE_IMAGE
 ARG VERIFIER_IMAGE
 
+FROM hud-linux-isolation AS hud-linux-isolation
 FROM ${VERIFIER_IMAGE} AS verifier-root
 FROM docker:28.3.3-cli AS docker-cli
 FROM ${BASE_IMAGE} AS runtime
@@ -11,6 +12,8 @@ COPY --from=ghcr.io/astral-sh/uv:0.8.15 /uv /media/hud/bin/uv
 COPY env.py install.sh config.json image-config.json verifier-image-config.json /media/hud/
 COPY peer-image-configs /media/hud/peer-image-configs
 COPY packages /media/hud/packages
+COPY --from=hud-linux-isolation / /media/hud/
+RUN /media/hud/bin/bwrap --version
 RUN sh /media/hud/install.sh "${HUD_REQUIREMENT}"
 
 ENV HUD_SKIP_VERSION_CHECK=1

@@ -35,10 +35,19 @@ if TYPE_CHECKING:
 
 def test_attaching_a_workspace_writes_nothing(tmp_path: Path) -> None:
     env = Environment("pure")
-    env.workspace(tmp_path / "root")
+    env.workspace(tmp_path / "root", isolation="preferred")
 
     assert env.capabilities == []  # published at serve time, not declaration
     assert not (tmp_path / "root").exists()
+
+
+def test_environment_workspace_requires_isolation_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(workspace_module, "usable_bwrap", lambda: None)
+
+    with pytest.raises(RuntimeError, match="workspace isolation was required"):
+        Environment("required").workspace(tmp_path / "root")
 
 
 async def test_serving_publishes_the_workspace_capability(
@@ -49,7 +58,7 @@ async def test_serving_publishes_the_workspace_capability(
     monkeypatch.setattr(settings, "file_tracking_enabled", True)
     monkeypatch.setattr(workspace_module, "usable_bwrap", lambda: None)
     env = Environment("ws-env")
-    env.workspace(tmp_path / "root")
+    env.workspace(tmp_path / "root", isolation="preferred")
 
     async with served(env) as client:
         assert client.manifest is not None
@@ -93,7 +102,7 @@ async def test_workspace_file_tracking_can_be_opted_out(
 
     monkeypatch.setattr(settings, "file_tracking_enabled", True)
     env = Environment("ws-env")
-    env.workspace(tmp_path / "root", track_files=False)
+    env.workspace(tmp_path / "root", track_files=False, isolation="preferred")
 
     async with served(env) as client:
         assert client.binding("shell").protocol == "ssh/2"
@@ -106,7 +115,7 @@ async def test_reconnecting_reuses_the_same_workspace(tmp_path: Path) -> None:
     from hud.eval import LocalRuntime, Task
 
     env = Environment("ws-env")
-    env.workspace(tmp_path / "root")
+    env.workspace(tmp_path / "root", isolation="preferred")
 
     # Client-side urls are per-connection (forwarded); the daemon's identity
     # is its host key, which only stays stable if the workspace is reused.
@@ -154,7 +163,7 @@ async def _wait_for_pid_inactive(pid: int, max_wait: float = 2.0) -> bool:
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group regression")
 async def test_workspace_command_teardown_kills_background_children(tmp_path: Path) -> None:
     env = Environment("ws-env")
-    env.workspace(tmp_path / "root", track_files=False)
+    env.workspace(tmp_path / "root", track_files=False, isolation="preferred")
     pid_file = tmp_path / "root" / "child.pid"
     pid: int | None = None
 
@@ -176,7 +185,7 @@ async def test_workspace_command_teardown_kills_background_children(tmp_path: Pa
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group regression")
 async def test_workspace_session_close_kills_running_children(tmp_path: Path) -> None:
     env = Environment("ws-env")
-    env.workspace(tmp_path / "root", track_files=False)
+    env.workspace(tmp_path / "root", track_files=False, isolation="preferred")
     pid: int | None = None
 
     try:
@@ -212,7 +221,7 @@ async def test_workspace_channel_close_during_teardown_keeps_connection_usable(
     tmp_path: Path,
 ) -> None:
     env = Environment("ws-env")
-    env.workspace(tmp_path / "root", track_files=False)
+    env.workspace(tmp_path / "root", track_files=False, isolation="preferred")
     pid: int | None = None
 
     try:
@@ -258,7 +267,7 @@ async def test_workspace_channel_close_during_teardown_keeps_connection_usable(
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group regression")
 async def test_workspace_client_timeout_keeps_connection_usable(tmp_path: Path) -> None:
     env = Environment("ws-env")
-    env.workspace(tmp_path / "root", track_files=False)
+    env.workspace(tmp_path / "root", track_files=False, isolation="preferred")
 
     async with served(env) as client:
         ssh = cast("SSHClient", await client.open("shell"))
@@ -277,7 +286,7 @@ async def test_workspace_shell_replaces_invalid_utf8_without_losing_transport(
     tmp_path: Path,
 ) -> None:
     env = Environment("ws-env")
-    env.workspace(tmp_path / "root", track_files=False)
+    env.workspace(tmp_path / "root", track_files=False, isolation="preferred")
 
     async with served(env) as client:
         ssh = cast("SSHClient", await client.open("shell"))
@@ -294,7 +303,7 @@ async def test_workspace_shell_replaces_invalid_utf8_without_losing_transport(
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX setsid")
 async def test_workspace_command_bounds_detached_output_drain(tmp_path: Path) -> None:
     env = Environment("ws-env")
-    env.workspace(tmp_path / "root", track_files=False)
+    env.workspace(tmp_path / "root", track_files=False, isolation="preferred")
     pid: int | None = None
     setsid = shutil.which("setsid")
     if setsid is not None:
@@ -348,7 +357,7 @@ async def test_stop_tears_down_the_workspace(tmp_path: Path) -> None:
     from urllib.parse import urlsplit
 
     env = Environment("ws-env")
-    env.workspace(tmp_path / "root")
+    env.workspace(tmp_path / "root", isolation="preferred")
 
     async with served(env):
         # The substrate-local address (the manifest carries a forwarded one).
@@ -367,7 +376,7 @@ async def test_restarting_replaces_the_published_address_without_duplicates(
 
     monkeypatch.setattr(settings, "file_tracking_enabled", True)
     env = Environment("ws-env")
-    env.workspace(tmp_path / "root")
+    env.workspace(tmp_path / "root", isolation="preferred")
 
     async with served(env):
         pass

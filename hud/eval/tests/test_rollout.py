@@ -671,7 +671,7 @@ async def test_openai_compatible_write_reaches_workspace_grader(tmp_path: Path) 
     workspace = tmp_path / "workspace"
     report = workspace / "REPORT.md"
     env = Environment("opencode_report")
-    env.workspace(workspace, guest_path=str(workspace))
+    env.workspace(workspace, guest_path=str(workspace), isolation="preferred")
 
     @env.initialize
     async def seed() -> None:
@@ -722,7 +722,7 @@ async def test_tool_agent_timeout_stops_running_workspace_command_before_grading
     started = workspace / "started"
     late = workspace / "late"
     env = Environment("timeout_cleanup")
-    env.workspace(workspace, guest_path=str(workspace))
+    env.workspace(workspace, guest_path=str(workspace), isolation="preferred")
 
     @env.initialize
     async def seed() -> None:

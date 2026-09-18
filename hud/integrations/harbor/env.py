@@ -298,7 +298,7 @@ workspace = env.workspace(
     ],
     local_aliases=CONFIG["local_aliases"],
     ports=CONFIG["ports"],
-    require_isolation=True,
+    isolation_binary=ROOT / "bin" / "bwrap",
 )
 
 
@@ -863,7 +863,8 @@ async def grade_separate(
                     allowed_hosts=verifier_access,
                     credentials_dir=ROOT / "verifier-keys",
                     hand_over_root=False,
-                    require_isolation=True,
+                    isolation="required",
+                    isolation_binary=ROOT / "bin" / "bwrap",
                 )
                 try:
                     await isolated.start()

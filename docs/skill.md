@@ -253,13 +253,18 @@ Dockerfile explicitly — don't assume it's there:
 
 ```dockerfile
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git curl ca-certificates bubblewrap \
+        git curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install uv   # if your initialize hook calls uv
 ```
 
-`bubblewrap` (`bwrap`) is required for SSH session isolation — without it,
-`env.workspace()` runs unconfined and logs a warning on every task start.
+Workspace isolation is required by default. Linux workspace images must provide
+bubblewrap 0.12.0 or newer; an absent, older, or unusable binary makes
+`env.workspace()` fail closed. Use a base distribution that supplies a supported
+version, or install a current upstream build explicitly. `isolation="preferred"`
+is an explicit local-development opt-out; `isolation="none"` intentionally runs
+unconfined. Harbor adaptations carry their own HUD-built isolation artifact and
+do not depend on the submitted image's package repository.
 
 **Don't traverse parents for local paths.** `Path(__file__).parents[2]` crashes
 when env.py runs at `/app/env.py` (only one parent). Anchor from `_HERE` and

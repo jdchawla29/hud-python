@@ -13,12 +13,12 @@ export PATH="$root/bin:$PATH"
 
 if command -v apt-get >/dev/null 2>&1; then
   apt-get update -qq
-  apt-get install -y -qq bubblewrap util-linux python3 python3-venv python3-pip git curl ca-certificates
+  apt-get install -y -qq util-linux python3 python3-venv python3-pip git curl ca-certificates
   rm -rf /var/lib/apt/lists/*
 elif command -v apk >/dev/null 2>&1; then
-  apk add --no-cache bash bubblewrap util-linux python3 py3-pip git curl ca-certificates
+  apk add --no-cache bash util-linux python3 py3-pip git curl ca-certificates
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y bubblewrap util-linux python3 python3-pip git curl ca-certificates
+  dnf install -y util-linux python3 python3-pip git curl ca-certificates
   dnf clean all
 else
   echo "hud: Harbor environments require an apt-, apk-, or dnf-based image" >&2

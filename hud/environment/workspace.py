@@ -8,6 +8,7 @@ import ctypes
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger("hud.environment.workspace")
 
 _PROCESS_CLOSE_TIMEOUT_S = 5.0
+_MINIMUM_BWRAP_VERSION = (0, 12, 0)
 _CREATE_SUSPENDED = 0x00000004
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
@@ -198,16 +200,46 @@ class Bubblewrap:
 _bwrap_usable: Bubblewrap | Literal[False] | None = None
 
 
-def usable_bwrap() -> Bubblewrap | None:
+def usable_bwrap(binary: Path | str | None = None) -> Bubblewrap | None:
     """A working bubblewrap launch mode for this substrate, if one exists."""
     global _bwrap_usable
-    if isinstance(_bwrap_usable, Bubblewrap):
-        return _bwrap_usable
-    if _bwrap_usable is False:
-        return None
+    use_cache = binary is None
+    if use_cache:
+        if isinstance(_bwrap_usable, Bubblewrap):
+            return _bwrap_usable
+        if _bwrap_usable is False:
+            return None
 
-    path = shutil.which("bwrap")
+    path = shutil.which(str(binary) if binary is not None else "bwrap")
     if path is None:
+        return None
+    try:
+        version = subprocess.run(
+            [path, "--version"],
+            capture_output=True,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        version = None
+    match = (
+        re.search(rb"\bbubblewrap\s+(\d+)\.(\d+)\.(\d+)\b", version.stdout)
+        if version is not None and version.returncode == 0
+        else None
+    )
+    if match is None or tuple(map(int, match.groups())) < _MINIMUM_BWRAP_VERSION:
+        if use_cache:
+            _bwrap_usable = False
+        reported = (
+            version.stdout.decode("utf-8", "replace").strip()[:120]
+            if version is not None
+            else "unavailable"
+        )
+        LOGGER.warning(
+            "unsupported bwrap at %s (%s); bubblewrap >= %s is required",
+            path,
+            reported or "unknown version",
+            ".".join(map(str, _MINIMUM_BWRAP_VERSION)),
+        )
         return None
     probe_binary = shutil.which("true")
     if probe_binary is None:
@@ -262,16 +294,17 @@ def usable_bwrap() -> Bubblewrap | None:
                 check=False,
             )
             if probe.returncode == 0:
-                _bwrap_usable = launch
+                if use_cache:
+                    _bwrap_usable = launch
                 return launch
             failure = probe.stderr.decode("utf-8", "replace").strip()[:120]
         except (OSError, subprocess.SubprocessError):
             continue
 
-    _bwrap_usable = False
+    if use_cache:
+        _bwrap_usable = False
     LOGGER.warning(
-        "bwrap is installed but cannot create an isolated process namespace (%s); "
-        "sessions will run WITHOUT isolation.",
+        "bwrap is installed but cannot create an isolated process namespace (%s)",
         failure,
     )
     return None
@@ -450,13 +483,14 @@ class Workspace:
     time. Drive it directly (``start()`` / :meth:`capability` / ``stop()``)
     to publish the capability yourself.
 
-    ``shell_uid`` and ``shell_gid`` drop agent sessions to that identity with
-    ``setpriv`` when the serving process is root — the privilege wall for
-    substrates where bwrap is unavailable and the env process holds secrets
-    the agent must not read.
-    No-op off root. Only the workspace directory itself is handed to the uid
-    at start (O(1), on the serving path); pre-staged content is the author's
-    to own via ``COPY --chown`` or task setup.
+    Isolation is required by default. ``preferred`` and ``none`` are explicit
+    opt-outs for development substrates which cannot provide a supported
+    backend. ``shell_uid`` and ``shell_gid`` additionally drop agent sessions
+    to that identity with ``setpriv`` when the serving process is root. This is
+    a defense-in-depth identity boundary, not an isolation substitute. No-op
+    off root. Only the workspace directory itself is handed to the uid at start
+    (O(1), on the serving path); pre-staged content is the author's to own via
+    ``COPY --chown`` or task setup.
     """
 
     def __init__(
@@ -482,7 +516,8 @@ class Workspace:
         track_files: bool = False,
         shell_uid: int | None = None,
         shell_gid: int | None = None,
-        require_isolation: bool = False,
+        isolation: Literal["required", "preferred", "none"] = "required",
+        isolation_binary: Path | str | None = None,
         credentials_dir: Path | str | None = None,
         hosts_path: Path | str | None = None,
         hand_over_root: bool = True,
@@ -526,7 +561,15 @@ class Workspace:
         self._system_mounts: tuple[Mount, ...] = tuple(
             system_mounts if system_mounts is not None else DEFAULT_SYSTEM_MOUNTS,
         )
-        self._bwrap = usable_bwrap()
+        if isolation not in {"required", "preferred", "none"}:
+            raise ValueError(f"unknown workspace isolation policy: {isolation!r}")
+        self._isolation = isolation
+        if isolation == "none":
+            self._bwrap = None
+        elif isolation_binary is None:
+            self._bwrap = usable_bwrap()
+        else:
+            self._bwrap = usable_bwrap(isolation_binary)
         # Without bwrap there is no `/workspace` mount — the sandbox *is* the real
         # directory, so address it by its real path. Otherwise `cd /workspace`
         # lands in a phantom dir and the editor/bash disagree on where files are.
@@ -542,12 +585,11 @@ class Workspace:
         # Whether the root is chowned to the shell identity at start. Off where the
         # image staged it already: whose it is, is the image's statement.
         self._hand_over_root = hand_over_root
-        if require_isolation and self._bwrap is None:
+        if isolation == "required" and self._bwrap is None:
             raise RuntimeError(
-                "isolation was required but bwrap cannot sandbox here: install "
-                "bubblewrap and use a container runtime that allows unprivileged "
-                "user namespaces. Refusing to serve sessions that would silently "
-                "run unisolated."
+                "workspace isolation was required but no supported backend is available: "
+                "on Linux, provision bubblewrap and use a substrate that allows "
+                "unprivileged user namespaces. Refusing to serve unisolated sessions."
             )
         self._ssh_host_key_path = host_key_path
         self._ssh_authorized_client_keys = list(authorized_client_keys or [])
@@ -667,7 +709,12 @@ class Workspace:
                 "shell_uid is set and the server is root, but privileges cannot be dropped "
                 "(setpriv is required on Linux). Refusing to serve agent shells as root."
             )
-        if self._bwrap is None and sys.platform != "win32" and shutil.which("bwrap") is None:
+        if (
+            self._isolation == "preferred"
+            and self._bwrap is None
+            and sys.platform != "win32"
+            and shutil.which("bwrap") is None
+        ):
             # Once per process: repeating this for every Workspace is noise, and
             # on macOS (no bubblewrap exists) it is an expected state. The
             # present-but-unusable case is diagnosed by usable_bwrap itself.

@@ -40,6 +40,11 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX workspace semantics")
 
 
+def _local_workspace(*args: Any, **kwargs: Any) -> Workspace:
+    kwargs.setdefault("isolation", "preferred")
+    return Workspace(*args, **kwargs)
+
+
 async def _connect(ws: Workspace) -> asyncssh.SSHClientConnection:
     host, port = ws.ssh_url.removeprefix("ssh://").split(":")
     key_path = ws.ssh_client_key_path
@@ -129,7 +134,7 @@ async def test_start_waits_until_the_ssh_acceptor_is_ready(
         return await listen(*args, **kwargs)
 
     monkeypatch.setattr(asyncssh, "listen", delayed_listen)
-    ws = Workspace(tmp_path / "root", track_files=False)
+    ws = _local_workspace(tmp_path / "root", track_files=False)
     start = asyncio.create_task(ws.start())
     await asyncio.wait_for(listen_started.wait(), 1.0)
 
@@ -147,7 +152,7 @@ async def test_start_waits_until_the_ssh_acceptor_is_ready(
 @pytest.mark.asyncio
 async def test_credentials_live_outside_the_served_root(tmp_path: Path) -> None:
     """The agent's shell root must not contain its SSH key material."""
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     await ws.start()
     try:
         key_path = ws.ssh_client_key_path
@@ -166,7 +171,7 @@ async def test_credentials_live_outside_the_served_root(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_sftp_subsystem_is_not_served(tmp_path: Path) -> None:
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     await ws.start()
     try:
         async with await _connect(ws) as conn:
@@ -178,7 +183,7 @@ async def test_sftp_subsystem_is_not_served(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_file_operations_use_the_exec_channel(tmp_path: Path) -> None:
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     await ws.start()
     try:
         async with await _connect(ws) as conn:
@@ -203,7 +208,7 @@ async def test_file_operations_use_the_exec_channel(tmp_path: Path) -> None:
 async def test_output_arrives_while_the_command_is_still_running(tmp_path: Path) -> None:
     """Held until exit, a long build tells the agent nothing while it runs and
     a session that never exits says nothing at all."""
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     await ws.start()
     try:
         async with await _connect(ws) as conn:
@@ -312,7 +317,7 @@ async def test_namespace_process_forwards_standard_streams(
 async def test_a_session_that_asks_for_a_terminal_gets_one(tmp_path: Path) -> None:
     """Programs branch on isatty: without a pty they take their batch path, so
     a terminal task is graded on behaviour a terminal would never produce."""
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     await ws.start()
     try:
         async with await _connect(ws) as conn:
@@ -336,7 +341,7 @@ async def test_a_session_that_asks_for_a_terminal_gets_one(tmp_path: Path) -> No
 async def test_a_resize_does_not_cost_the_session_its_keyboard(tmp_path: Path) -> None:
     """asyncssh delivers a resize as an exception on the stdin read, and it is
     not an asyncssh.Error — unhandled it escapes the relay and input stops."""
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     await ws.start()
     try:
         async with await _connect(ws) as conn:
@@ -359,7 +364,7 @@ async def test_a_resize_does_not_cost_the_session_its_keyboard(tmp_path: Path) -
 async def test_session_setup_failure_is_reported_to_the_client(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     monkeypatch.setattr(ws, "sandbox_pid", AsyncMock(side_effect=RuntimeError("map failed")))
     await ws.start()
     try:
@@ -385,7 +390,7 @@ async def test_dropped_session_env_excludes_server_secrets(
     _wall(monkeypatch)
     monkeypatch.setenv("HUD_API_KEY", "super-secret")
 
-    ws = Workspace(tmp_path / "root", shell_uid=1000, env={"CUSTOM": "1"})
+    ws = _local_workspace(tmp_path / "root", shell_uid=1000, env={"CUSTOM": "1"})
     session_env = ws._session_env()
     assert session_env is not None
     assert "HUD_API_KEY" not in session_env
@@ -407,7 +412,7 @@ def test_bwrap_drops_host_env_when_walled(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.setenv("HUD_API_KEY", "super-secret")
     _wall(monkeypatch)
 
-    ws = Workspace(tmp_path / "root", shell_uid=1000, env={"CUSTOM": "1"})
+    ws = _local_workspace(tmp_path / "root", shell_uid=1000, env={"CUSTOM": "1"})
     monkeypatch.setattr(ws, "_bwrap", Bubblewrap("/usr/bin/bwrap"))
     argv = ws.shell_argv("echo hi", env={"PER_CALL": "1"})
 
@@ -422,7 +427,7 @@ def test_bwrap_inherits_host_env_when_not_walled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("SENTINEL", "visible")
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     monkeypatch.setattr(ws, "_bwrap", Bubblewrap("/usr/bin/bwrap"))
     argv = ws.bwrap_argv(["bash", "-lc", "true"])
     assert _sandbox_env(argv)["SENTINEL"] == "visible"
@@ -438,7 +443,7 @@ def test_the_harness_own_configuration_never_reaches_a_session(
     monkeypatch.setenv("HUD_SKIP_VERSION_CHECK", "1")
     monkeypatch.setenv("ORDINARY", "kept")
     # What the task itself declares is the task's, HUD-shaped name or not.
-    ws = Workspace(tmp_path / "root", env={"HUD_TASK_DECLARED": "mine"})
+    ws = _local_workspace(tmp_path / "root", env={"HUD_TASK_DECLARED": "mine"})
     monkeypatch.setattr(ws, "_bwrap", Bubblewrap("/usr/bin/bwrap"))
 
     for argv in (
@@ -475,7 +480,7 @@ def test_session_argv_runs_on_bubblewrap_0_4(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Sessions must not pass an option an old-but-usable bwrap will reject."""
-    ws = Workspace(
+    ws = _local_workspace(
         tmp_path / "root",
         shell_uid=1000,
         env={"CUSTOM": "1"},
@@ -496,7 +501,7 @@ def test_session_argv_runs_on_bubblewrap_0_4(
 def test_hosted_sessions_do_not_create_new_namespaces(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ws = Workspace(tmp_path / "root", guest_path="/app", network=True)
+    ws = _local_workspace(tmp_path / "root", guest_path="/app", network=True)
     monkeypatch.setattr(ws, "_bwrap", Bubblewrap("/usr/bin/bwrap"))
 
     first = ws.session_argv("start-a-server &")
@@ -520,7 +525,7 @@ async def test_concurrent_sessions_share_one_sandbox(
 ) -> None:
     """An agent issues parallel tool calls; if each started its own sandbox,
     what one backgrounds would be invisible to the next."""
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     monkeypatch.setattr(ws, "_bwrap", Bubblewrap("/usr/bin/bwrap"))
     spawned = 0
 
@@ -545,7 +550,7 @@ def test_the_sandbox_reports_readiness_before_sessions_join_it(
 ) -> None:
     """bwrap names the child pid before that child has built its mount
     namespace, so the pid alone is not proof the sandbox can run anything."""
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     monkeypatch.setattr(ws, "_bwrap", Bubblewrap("/usr/bin/bwrap"))
     argv = ws.bwrap_argv(["sh", "-c", "echo ready"], info_fd=7)
 
@@ -563,7 +568,7 @@ def test_network_ownership_matches_bubblewrap_isolation(
         (None, False, True),  # no-network, however it was spelled
         (None, True, False),  # the substrate's network, as before
     ):
-        ws = Workspace(tmp_path / "root", network=network, allowed_hosts=allowed)
+        ws = _local_workspace(tmp_path / "root", network=network, allowed_hosts=allowed)
         monkeypatch.setattr(ws, "_bwrap", Bubblewrap("/usr/bin/bwrap"))
 
         assert ws.owns_netns is owns
@@ -576,7 +581,7 @@ async def test_run_uses_fresh_mounts_and_shared_network_with_visitor_egress(
 ) -> None:
     monkeypatch.setenv("PATH", "/task/bin:/usr/bin")
     monkeypatch.setenv("HUD_API_KEY", "sk-secret")
-    ws = Workspace(tmp_path / "root", env={"AGENT_ONLY": "secret"})
+    ws = _local_workspace(tmp_path / "root", env={"AGENT_ONLY": "secret"})
     monkeypatch.setattr(ws, "_bwrap", Bubblewrap("/usr/bin/bwrap"))
 
     @contextlib.asynccontextmanager
@@ -622,7 +627,7 @@ async def test_run_uses_a_disposable_writable_hosts_file(
 ) -> None:
     source = tmp_path / "hosts"
     source.write_text("127.0.0.1 localhost\n", encoding="utf-8")
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     ws._hosts_path = source
     monkeypatch.setattr(ws, "_bwrap", Bubblewrap("/usr/bin/bwrap"))
     monkeypatch.setattr(ws, "sandbox_pid", AsyncMock(return_value=7))
@@ -664,7 +669,7 @@ def test_peer_forwarders_use_the_substrate_listen_backlog() -> None:
 async def test_visiting_none_uses_the_workspace_egress(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     monkeypatch.setattr(ws, "sandbox_pid", AsyncMock(return_value=7))
     ws._egress = cast(
         "Any",
@@ -685,7 +690,7 @@ async def test_visiting_uses_the_reserved_workspace_bridge(
 ) -> None:
     credentials = Path(tempfile.mkdtemp(prefix="hud-visitor-", dir="/tmp"))
     try:
-        ws = Workspace(
+        ws = _local_workspace(
             tmp_path / "root",
             peers=[Peer("db", 5432)],
             ports=[5432],
@@ -711,7 +716,7 @@ async def test_overlapping_runs_keep_their_visitor_policies_and_credentials(
     from hud.environment import egress as egress_mod
 
     credentials = Path(tempfile.mkdtemp(prefix="hud-visitors-", dir="/tmp"))
-    ws = Workspace(tmp_path / "root", credentials_dir=credentials)
+    ws = _local_workspace(tmp_path / "root", credentials_dir=credentials)
     monkeypatch.setattr(ws, "_bwrap", Bubblewrap("/usr/bin/bwrap"))
     monkeypatch.setattr(ws, "sandbox_pid", AsyncMock(return_value=7))
 
@@ -807,7 +812,7 @@ async def test_overlapping_runs_keep_their_visitor_policies_and_credentials(
 async def test_staged_verifier_is_launched_by_the_namespace_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     monkeypatch.setattr(
         ws,
         "_bwrap",
@@ -832,7 +837,7 @@ async def test_staged_verifier_is_launched_by_the_namespace_host(
 async def test_launch_keeps_an_environment_entrypoint_outside_agent_sessions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     _wall(monkeypatch)
     monkeypatch.setattr(workspace_mod, "_is_root", lambda: True)
     monkeypatch.setattr(workspace_mod.sys, "platform", "linux")
@@ -869,7 +874,7 @@ async def test_launch_keeps_an_environment_entrypoint_outside_agent_sessions(
 
 @pytest.mark.asyncio
 async def test_terminate_sessions_preserves_the_namespace_host(tmp_path: Path) -> None:
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     terminate_sessions = AsyncMock()
     ws._namespace = cast("Any", SimpleNamespace(terminate_sessions=terminate_sessions))
 
@@ -937,7 +942,7 @@ async def test_namespace_host_only_terminates_a_used_session_holder(
 async def test_run_can_use_a_fresh_no_network_sandbox(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     monkeypatch.setattr(
         ws,
         "_bwrap",
@@ -977,7 +982,7 @@ async def test_an_isolated_command_keeps_the_image_environment(
     Both branches of run() give it the serving environment, less HUD's own."""
     monkeypatch.setenv("PATH", "/task/bin:/usr/bin")
     monkeypatch.setenv("HUD_API_KEY", "sk-secret")
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     monkeypatch.setattr(ws, "_bwrap", Bubblewrap("/usr/bin/bwrap"))
     monkeypatch.setattr(workspace_mod, "install_identity_map", AsyncMock(return_value=9))
     complete = AsyncMock(return_value=ProcessResult(0, b"", b""))
@@ -996,7 +1001,7 @@ async def test_an_isolated_command_keeps_the_image_environment(
 async def test_failed_isolated_run_terminates_its_sandbox(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     monkeypatch.setattr(ws, "_bwrap", Bubblewrap("/usr/bin/bwrap"))
     process = SimpleNamespace(terminate=AsyncMock(), complete=AsyncMock())
     monkeypatch.setattr(
@@ -1021,7 +1026,7 @@ async def test_failed_isolated_run_terminates_its_sandbox(
 async def test_failed_sandbox_start_discards_the_holder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ws = Workspace(tmp_path / "root", network=True)
+    ws = _local_workspace(tmp_path / "root", network=True)
     monkeypatch.setattr(ws, "_bwrap", Bubblewrap("/usr/bin/bwrap"))
     failed_holder = SimpleNamespace(
         returncode=None,
@@ -1051,7 +1056,7 @@ async def test_failed_sandbox_start_discards_the_holder(
 async def test_staged_sandbox_hosts_the_namespace_server_outside_bwrap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ws = Workspace(tmp_path / "root", network=False)
+    ws = _local_workspace(tmp_path / "root", network=False)
     monkeypatch.setattr(
         ws,
         "_bwrap",
@@ -1167,7 +1172,7 @@ async def test_a_declared_peer_is_a_name_sessions_resolve(
     of its own, since otherwise the service is already at its real address."""
     from hud.environment.egress import Peer
 
-    ws = Workspace(
+    ws = _local_workspace(
         tmp_path / "root",
         peers=[Peer("db", 5432)],
         local_aliases=["main"],
@@ -1189,7 +1194,7 @@ async def test_a_declared_peer_is_a_name_sessions_resolve(
     # Bound over /etc/hosts, so every session reads it whatever its identity.
     assert (await asyncio.to_thread(hosts.stat)).st_mode & 0o044
 
-    sharing = Workspace(tmp_path / "shared", peers=[Peer("db", 5432)], network=True)
+    sharing = _local_workspace(tmp_path / "shared", peers=[Peer("db", 5432)], network=True)
     monkeypatch.setattr(sharing, "_bwrap", Bubblewrap("/usr/bin/bwrap"))
     sharing._prepare_runtime()
     assert "/etc/hosts" not in sharing.bwrap_argv(["true"])
@@ -1202,7 +1207,7 @@ def test_private_workspace_preserves_localhost_without_peers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     hosts = tmp_path / "hosts"
-    ws = Workspace(
+    ws = _local_workspace(
         tmp_path / "root",
         allowed_hosts=set(),
         hosts_path=hosts,
@@ -1699,7 +1704,7 @@ def test_shell_uid_wraps_sessions_in_setpriv(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _wall(monkeypatch)
-    ws = Workspace(tmp_path / "root", shell_uid=1000)
+    ws = _local_workspace(tmp_path / "root", shell_uid=1000)
     argv = ws.shell_argv("echo hi")
     # Absolute path: a bare name would resolve through the session PATH,
     # which the agent can influence — that lookup happens before the drop.
@@ -1724,7 +1729,7 @@ def test_shell_identity_keeps_the_declared_primary_group(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _wall(monkeypatch)
-    ws = Workspace(tmp_path / "root", shell_uid=1000, shell_gid=2000)
+    ws = _local_workspace(tmp_path / "root", shell_uid=1000, shell_gid=2000)
 
     argv = ws.shell_argv("id")
 
@@ -1738,7 +1743,9 @@ def test_caller_env_is_injected_only_after_the_drop(
     """An agent-influenced var like LD_PRELOAD must not be in the environment
     of the root-run setpriv; it may only reach the post-drop shell."""
     _wall(monkeypatch)
-    ws = Workspace(tmp_path / "root", shell_uid=1000, env={"LD_PRELOAD": "/workspace/evil.so"})
+    ws = _local_workspace(
+        tmp_path / "root", shell_uid=1000, env={"LD_PRELOAD": "/workspace/evil.so"}
+    )
     argv = ws.shell_argv("echo hi")
     assert argv[0] == "/usr/bin/setpriv"
     assert "LD_PRELOAD=/workspace/evil.so" in argv[argv.index("-i") :]
@@ -1761,7 +1768,7 @@ async def test_wall_handoff_is_top_level_only_and_never_walks_the_tree(
     (root / "pkg").mkdir(parents=True)
     (root / "pkg" / "mod.py").write_text("x = 1\n")
 
-    ws = Workspace(root, shell_uid=1000)
+    ws = _local_workspace(root, shell_uid=1000)
     await ws.start()
     try:
         assert [Path(p).name for p in handed] == ["root"]
@@ -1781,20 +1788,20 @@ async def test_wall_handoff_failure_refuses_to_serve(
         raise PermissionError("operation not permitted")
 
     monkeypatch.setattr(os, "lchown", deny)
-    ws = Workspace(tmp_path / "root", shell_uid=1000)
+    ws = _local_workspace(tmp_path / "root", shell_uid=1000)
     with pytest.raises(PermissionError):
         await ws.start()
 
 
 def test_shell_uid_is_a_noop_off_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(Workspace, "_drops_privileges", lambda self: False)
-    ws = Workspace(tmp_path / "root", shell_uid=1000)
+    ws = _local_workspace(tmp_path / "root", shell_uid=1000)
     assert "setpriv" not in ws.shell_argv("echo hi")
     assert ws._session_env() is None
 
 
 def test_without_shell_uid_argv_is_unchanged(tmp_path: Path) -> None:
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     assert "setpriv" not in ws.shell_argv("echo hi")
 
 
@@ -1810,7 +1817,7 @@ async def test_session_wrapper_environment_contains_no_server_secrets(
         raise SpawnCaptured(kwargs.get("env"))
 
     monkeypatch.setenv("HUD_API_KEY", "super-secret")
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     monkeypatch.setattr(ws, "sandbox_pid", AsyncMock(return_value=7))
     ws._namespace = cast("Any", SimpleNamespace(spawn=capture_spawn))
     process = SimpleNamespace(term_type=None, command="true")
@@ -1857,7 +1864,7 @@ async def test_namespace_wait_status_is_forwarded_to_ssh_client(
         channel=channel,
         exit=Mock(),
     )
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     monkeypatch.setattr(ws, "sandbox_pid", AsyncMock(return_value=7))
     ws._namespace = cast("Any", namespace)
 
@@ -1875,13 +1882,13 @@ async def test_root_without_working_drop_fails_closed(
     as root."""
     monkeypatch.setattr("hud.environment.workspace._is_root", lambda: True)
     monkeypatch.setattr(Workspace, "_drops_privileges", lambda self: False)
-    ws = Workspace(tmp_path / "root", shell_uid=1000)
+    ws = _local_workspace(tmp_path / "root", shell_uid=1000)
     with pytest.raises(RuntimeError, match="privileges cannot be dropped"):
         await ws.start()
 
 
 def test_credentials_dir_is_private_and_unpredictable(tmp_path: Path) -> None:
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     creds = ws._credentials_dir()
     assert creds.is_relative_to(Path(tempfile.gettempdir()))
     assert not creds.is_relative_to(ws.root)
@@ -1986,7 +1993,7 @@ async def test_windows_channel_close_terminates_the_process_job(
         stderr=SimpleNamespace(write=Mock()),
         exit=Mock(),
     )
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     popen = Mock(return_value=child)
     monkeypatch.setattr(workspace_mod.sys, "platform", "win32")
     monkeypatch.setattr(workspace_mod, "_WindowsJob", Mock(return_value=job))
@@ -2020,25 +2027,28 @@ def test_usable_bwrap_stages_pid_creation_when_direct_mounting_is_blocked(
 
     def run(argv: list[str], **_: object) -> subprocess.CompletedProcess[bytes]:
         calls.append(argv)
-        return subprocess.CompletedProcess(argv, int(len(calls) == 1), b"", b"blocked")
+        if argv[-1] == "--version":
+            return subprocess.CompletedProcess(argv, 0, b"bubblewrap 0.12.0\n", b"")
+        return subprocess.CompletedProcess(argv, int(len(calls) == 2), b"", b"blocked")
 
     monkeypatch.setattr(ws.subprocess, "run", run)
 
     assert ws.usable_bwrap() == Bubblewrap("/usr/bin/bwrap", pid_unshare="/usr/bin/unshare")
-    assert "--unshare-pid" in calls[0]
-    assert calls[1][:4] == [
+    assert calls[0] == ["/usr/bin/bwrap", "--version"]
+    assert "--unshare-pid" in calls[1]
+    assert calls[2][:4] == [
         "/usr/bin/unshare",
         "--kill-child=KILL",
         "--pid",
         "--mount-proc",
     ]
-    assert "--unshare-pid" not in calls[1]
+    assert "--unshare-pid" not in calls[2]
 
 
 def test_staged_bwrap_keeps_user_isolation_and_uses_the_staged_proc(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ws = Workspace(tmp_path / "root")
+    ws = _local_workspace(tmp_path / "root")
     monkeypatch.setattr(
         ws,
         "_bwrap",
@@ -2066,13 +2076,63 @@ def test_staged_bwrap_keeps_user_isolation_and_uses_the_staged_proc(
     assert joined[dev : dev + 3] == ["--dev-bind", "/dev", "/dev"]
 
 
-def test_required_isolation_refuses_when_unavailable(monkeypatch, tmp_path) -> None:
+def test_workspace_requires_isolation_by_default(monkeypatch, tmp_path) -> None:
     from hud.environment import workspace as ws
 
     monkeypatch.setattr(ws, "usable_bwrap", lambda: None)
 
-    with pytest.raises(RuntimeError, match="isolation was required"):
-        ws.Workspace(tmp_path, require_isolation=True)
+    with pytest.raises(RuntimeError, match="workspace isolation was required"):
+        ws.Workspace(tmp_path)
+
+
+def test_usable_bwrap_rejects_vulnerable_versions(monkeypatch) -> None:
+    from hud.environment import workspace as ws
+
+    monkeypatch.setattr(ws, "_bwrap_usable", None)
+    monkeypatch.setattr(ws.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+    monkeypatch.setattr(
+        ws.subprocess,
+        "run",
+        lambda argv, **_: subprocess.CompletedProcess(argv, 0, b"bubblewrap 0.11.0\n", b""),
+    )
+
+    assert ws.usable_bwrap() is None
+    assert ws._bwrap_usable is False
+
+
+def test_explicit_isolation_binary_bypasses_the_process_cache(monkeypatch, tmp_path) -> None:
+    from hud.environment import workspace as ws
+
+    monkeypatch.setattr(ws, "_bwrap_usable", Bubblewrap("/usr/bin/bwrap"))
+    seen: list[str] = []
+
+    def which(binary: str) -> str | None:
+        seen.append(binary)
+        return {
+            "/media/hud/bin/bwrap": "/media/hud/bin/bwrap",
+            "true": "/usr/bin/true",
+        }.get(binary)
+
+    monkeypatch.setattr(ws.shutil, "which", which)
+    monkeypatch.setattr(
+        ws.subprocess,
+        "run",
+        lambda argv, **_: subprocess.CompletedProcess(
+            argv,
+            0,
+            b"bubblewrap 0.12.0\n" if argv[-1] == "--version" else b"",
+            b"",
+        ),
+    )
+
+    workspace = ws.Workspace(
+        tmp_path,
+        isolation="required",
+        isolation_binary="/media/hud/bin/bwrap",
+    )
+
+    assert workspace._bwrap == Bubblewrap("/media/hud/bin/bwrap")
+    assert seen[0] == "/media/hud/bin/bwrap"
 
 
 @pytest.mark.asyncio
@@ -2187,7 +2247,7 @@ def test_private_workspace_maps_its_own_hostname_to_loopback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(socket, "gethostname", lambda: "container-self")
-    ws = Workspace(
+    ws = _local_workspace(
         tmp_path / "root",
         allowed_hosts=set(),
         local_aliases=["main"],

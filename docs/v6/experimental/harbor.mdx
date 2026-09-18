@@ -53,7 +53,8 @@ packaged.
     ├── compose.json
     ├── environment/
     ├── hud/ or main/           # HUD build payload (depends on source shape)
-    ├── tests/                 # inline-verifier task tests
+    │   └── linux-isolation/    # pinned HUD-owned Linux isolation build
+    ├── tests/                  # inline-verifier task tests
     └── verifier/              # verifier-environment build context, when declared
 ```
 
@@ -62,7 +63,12 @@ paths are rebased beneath `compose-project/`; task instructions remain in
 `tasks.json`; inline tests remain outside the environment image and are mounted
 read-only for the selected task. Build-only base and verifier services stay in
 the Compose model with `scale: 0` and feed the `main` build through named
-`service:` contexts. The full recipe is covered in
+`service:` contexts. A separate scale-zero `hud-linux-isolation` service builds
+bubblewrap from a pinned, checksummed upstream release and supplies it through
+the same named-context mechanism. The adapter does not rewrite the submitted
+Dockerfile or replace its base image. The current isolation artifact targets
+glibc-based Linux images; an incompatible image, including Alpine/musl, fails
+during the generated build instead of running without isolation. The full recipe is covered in
 [Compose environments](/v6/experimental/compose).
 
 Tasks with identical environment and phase configuration share one generated

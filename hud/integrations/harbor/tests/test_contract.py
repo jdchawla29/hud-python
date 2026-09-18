@@ -137,6 +137,7 @@ def test_adapt_packages_an_image_task_as_a_compose_project(tmp_path: Path) -> No
         "config.json",
         "env.py",
         "install.sh",
+        "linux-isolation",
         "packages",
     }
     build_script = (project_root / "build.sh").read_text("utf-8")
@@ -153,14 +154,21 @@ def test_adapt_packages_an_image_task_as_a_compose_project(tmp_path: Path) -> No
     assert task.runtime_config.compose.root == context
     compose_path = context / "compose-project" / "compose.json"
     project = _assert_stock_compose_complete(compose_path)
-    assert set(project["services"]) == {"main"}
+    assert set(project["services"]) == {"main", "hud-linux-isolation"}
     main = project["services"]["main"]
     assert main["image"].startswith("hud-harbor:")
     assert main["build"] == {
-        "additional_contexts": {"hud": "./hud"},
+        "additional_contexts": {
+            "hud": "./hud",
+            "hud-linux-isolation": "service:hud-linux-isolation",
+        },
         "context": "./environment",
         "dockerfile": "../Dockerfile",
     }
+    isolation = project["services"]["hud-linux-isolation"]
+    assert isolation["build"] == {"context": "./hud/linux-isolation"}
+    assert isolation["image"] == "hud-linux-isolation:0.12.0"
+    assert isolation["scale"] == 0
     assert main["volumes"] == ["./tests:/media/hud/tests:ro"]
     combined = project_root / "Dockerfile"
     assert combined.read_text("utf-8").startswith("FROM python:3.11-slim AS hud-base\n")
@@ -205,7 +213,7 @@ def test_image_task_keeps_non_recipe_compose_names_as_context_files(tmp_path: Pa
     environment = context / "compose-project" / "environment"
     assert (environment / "docker-compose.yml").read_text("utf-8") == content
     project = json.loads((context / "compose-project" / "compose.json").read_text("utf-8"))
-    assert set(project["services"]) == {"main"}
+    assert set(project["services"]) == {"main", "hud-linux-isolation"}
 
 
 def test_image_task_preserves_a_named_final_stage_verbatim(tmp_path: Path) -> None:
@@ -218,7 +226,10 @@ def test_image_task_preserves_a_named_final_stage_verbatim(tmp_path: Path) -> No
     environment = context / "compose-project" / "environment"
     assert (environment / "Dockerfile").read_bytes() == dockerfile.encode("utf-8")
     combined = (environment.parent / "Dockerfile").read_bytes().decode("utf-8")
-    assert combined.startswith(dockerfile + "\nFROM final AS hud-runtime\n")
+    assert combined.startswith(
+        dockerfile
+        + "\nFROM hud-linux-isolation AS hud-linux-isolation\n\nFROM final AS hud-runtime\n"
+    )
 
 
 def test_image_task_names_an_unnamed_multiline_final_stage(tmp_path: Path) -> None:
@@ -231,7 +242,8 @@ def test_image_task_names_an_unnamed_multiline_final_stage(tmp_path: Path) -> No
     combined = (context / "compose-project" / "Dockerfile").read_text("utf-8")
     assert combined.startswith(
         "FROM --platform=linux/amd64 \\\n  python:3.12-slim AS hud-base\n"
-        "RUN true\n\nFROM hud-base AS hud-runtime\n"
+        "RUN true\n\nFROM hud-linux-isolation AS hud-linux-isolation\n\n"
+        "FROM hud-base AS hud-runtime\n"
     )
 
 
@@ -364,7 +376,8 @@ services:
     assert project["services"]["main"]["build"]["context"] == "./main"
     assert project["services"]["main"]["build"]["target"] == "service-access"
     assert project["services"]["main"]["build"]["additional_contexts"] == {
-        "hud-base": "service:hud-base"
+        "hud-base": "service:hud-base",
+        "hud-linux-isolation": "service:hud-linux-isolation",
     }
     assert project["services"]["main"]["image"].startswith("hud-harbor:")
     assert project["services"]["hud-base"]["image"].startswith("hud-harbor-base:")
@@ -461,7 +474,8 @@ services:
     assert "./environment/main-data:/var/lib/main" in project["services"]["main"]["volumes"]
     assert project["services"]["redis"]["image"] == "redis:7-alpine"
     assert project["services"]["main"]["build"]["additional_contexts"] == {
-        "hud-base": "service:hud-base"
+        "hud-base": "service:hud-base",
+        "hud-linux-isolation": "service:hud-linux-isolation",
     }
 
 
@@ -1057,6 +1071,7 @@ timeout_sec = 10
     assert compose["services"]["main"]["build"]["target"] == "verifier"
     assert compose["services"]["main"]["build"]["additional_contexts"] == {
         "hud-base": "service:hud-base",
+        "hud-linux-isolation": "service:hud-linux-isolation",
         "hud-verifier": "service:hud-verifier",
     }
     assert compose["services"]["hud-verifier"]["scale"] == 0
@@ -1103,10 +1118,11 @@ gpu_types = ["H100"]
     assert row.verifier.runtime_config is None
     assert isinstance(row.runtime_config.compose.document, Path)
     project = _assert_stock_compose_complete(row.runtime_config.compose.document)
-    assert set(project["services"]) == {"main", "hud-verifier"}
+    assert set(project["services"]) == {"main", "hud-linux-isolation", "hud-verifier"}
     assert project["services"]["main"]["build"] == {
         "additional_contexts": {
             "hud": "./hud",
+            "hud-linux-isolation": "service:hud-linux-isolation",
             "hud-verifier": "service:hud-verifier",
         },
         "context": "./environment",
@@ -1257,7 +1273,14 @@ def test_authored_runtime_assets_are_valid_source() -> None:
     assert 'uv python install "$python_version"' in installer
     assert 'python="$root/bin/python$python_version"' in installer
     assert 'uv venv "$root/venv" --python "$python"' in installer
-    assert "dnf install -y bubblewrap" in installer
+    assert "dnf install -y util-linux" in installer
+    assert "install -y bubblewrap" not in installer
+    isolation = (
+        integration.parents[1] / "environment/assets/linux-isolation/Dockerfile"
+    ).read_text("utf-8")
+    assert "BUBBLEWRAP_VERSION=0.12.0" in isolation
+    assert "BUBBLEWRAP_SHA256=9760d007" in isolation
+    assert "-Dinstall_rpath=\\$ORIGIN/../lib" in isolation
     result = subprocess.run(
         ["sh", "-n", integration / "install.sh"],
         check=False,

@@ -290,7 +290,7 @@ async def _down():
 ```
 
 <Note>
-Use a relative path (`"workspace"`, created next to `env.py`). Sandbox isolation (`bwrap`) is Linux-only - unisolated elsewhere, isolated in a built image.
+Use a relative path (`"workspace"`, created next to `env.py`). Workspace isolation is required by default. On Linux, provide bubblewrap 0.12.0 or newer on `PATH`, or pass its exact path with `isolation_binary`. Construction fails instead of serving an unisolated workspace when the backend is missing, too old, or unusable. For local development on a substrate without a supported backend, opt in explicitly with `isolation="preferred"`; use `isolation="none"` only when an unconfined workspace is intentional.
 </Note>
 
 | Parameter | Type | Description |
@@ -305,6 +305,8 @@ Use a relative path (`"workspace"`, created next to `env.py`). Sandbox isolation
 | `port` | `int` | SSH bind port (`0` binds an ephemeral port). Default `0`. |
 | `user` | `str` | SSH username. Default `"agent"`. |
 | `shell_uid` | `int \| None` | When serving as root, run every agent command as this uid/gid with cleared supplementary groups and `no_new_privs`. Only the workspace directory itself is handed to the uid at start (O(1)); own pre-staged content via `COPY --chown` or task setup. Default `None`. |
+| `isolation` | `"required" \| "preferred" \| "none"` | Isolation policy. `required` fails closed and is the default; `preferred` permits an unisolated fallback with a warning; `none` explicitly disables isolation. |
+| `isolation_binary` | `Path \| str \| None` | Exact isolation binary to probe instead of resolving `bwrap` from `PATH`. |
 | `host_key_path` | `Path \| None` | Reuse a host key instead of generating one. |
 | `authorized_client_keys` | `list[Path] \| None` | Authorize specific client public keys. |
 | `track_files` | `bool` | Serve file-tracking telemetry over the workspace lifecycle. Constructor default `False`; `env.workspace(...)` defaults it to `HUD_FILE_TRACKING_ENABLED` (on). |

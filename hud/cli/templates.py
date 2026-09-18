@@ -37,7 +37,7 @@ env = Environment(name="{env_name}")
 # to pre-populate files (e.g. a git clone, dataset, or config).
 
 WORKSPACE = Path(tempfile.mkdtemp(prefix="hud-{env_name}-"))
-ws = env.workspace(WORKSPACE, network=True)
+ws = env.workspace(WORKSPACE, network=True, isolation="preferred")
 
 
 # =============================================================================
