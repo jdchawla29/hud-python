@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -104,6 +105,23 @@ def test_command_follows_explicit_gateway_routing(monkeypatch: pytest.MonkeyPatc
         assert "--sandbox workspace-write" in command
         assert "--model gpt-5.6-sol" in command
         assert command.endswith(" -")
+
+
+def test_command_configures_bridged_mcp_server() -> None:
+    command = codex_command(
+        CodexCLIConfig(use_hud_gateway=False),
+        "bash",
+        mcp_servers={
+            "workspace-processes": {
+                "type": "stdio",
+                "command": "sh",
+                "args": ["-c", "relay"],
+            }
+        },
+    )
+
+    assert '-c \'mcp_servers."workspace-processes".command="sh"\'' in command
+    assert '-c \'mcp_servers."workspace-processes".args=["-c", "relay"]\'' in command
 
 
 @pytest.mark.parametrize("sandbox", ["read-only", "workspace-write", "danger-full-access"])
@@ -325,6 +343,7 @@ async def test_agent_opens_ssh_and_uses_workspace_prompt(monkeypatch: pytest.Mon
 
     class Client:
         inference = None
+        manifest = SimpleNamespace(bindings=[ssh.capability])
 
         async def open(self, ref: str) -> _FakeSSH:
             assert ref == "ssh"
@@ -347,7 +366,78 @@ async def test_agent_opens_ssh_and_uses_workspace_prompt(monkeypatch: pytest.Mon
         prompt="Fix it",
         executable="codex",
         connection=None,
+        mcp_servers={},
     )
+
+
+async def test_agent_bridges_controller_mcp_capability(monkeypatch: pytest.MonkeyPatch) -> None:
+    ssh = _FakeSSH(_FakeProcess(_STREAM_JSON))
+    service = Capability.mcp(
+        name="workspace-processes",
+        url="http://environment:8000/mcp",
+        transport="streamable-http",
+    )
+    service.params["controller_bridge"] = True
+    routed = Capability.mcp(
+        name="workspace-processes",
+        url="http://127.0.0.1:41000/mcp",
+        transport="streamable-http",
+    )
+    routed.params["controller_bridge"] = True
+    bridge_active = False
+
+    class Client:
+        manifest = SimpleNamespace(bindings=[ssh.capability, service])
+
+        async def open(self, ref: str) -> _FakeSSH:
+            assert ref == "ssh"
+            return ssh
+
+        def binding(self, ref: str) -> Capability:
+            assert ref == "workspace-processes"
+            return routed
+
+    @asynccontextmanager
+    async def bridge(
+        bridge_ssh: _FakeSSH,
+        capability: Capability,
+        *,
+        shell: str,
+    ) -> Any:
+        nonlocal bridge_active
+        assert bridge_ssh is ssh
+        assert capability is routed
+        assert shell == "bash"
+        bridge_active = True
+        try:
+            yield {"type": "stdio", "command": "sh", "args": ["-c", "relay"]}
+        finally:
+            bridge_active = False
+
+    async def execute(*_args: Any, **kwargs: Any) -> None:
+        assert bridge_active
+        assert kwargs["mcp_servers"] == {
+            "workspace-processes": {
+                "type": "stdio",
+                "command": "sh",
+                "args": ["-c", "relay"],
+            }
+        }
+
+    monkeypatch.setattr("hud.agents.codex.agent.cli_mcp.bridge_mcp", bridge)
+    monkeypatch.setattr("hud.agents.codex.agent.run_codex", execute)
+    await CodexCLIAgent()(
+        cast(
+            "Any",
+            SimpleNamespace(
+                client=Client(),
+                prompt_text="reload the service",
+                runtime_config=None,
+                connections={},
+            ),
+        )
+    )
+    assert not bridge_active
 
 
 async def test_executable_resolution_prefers_matching_managed_bundle() -> None:

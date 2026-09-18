@@ -124,7 +124,9 @@ Each graded evaluation is a **trace** (the SDK's live handle is a `Run`). With `
 ## Existing benchmarks
 
 The experimental `hud.integrations.harbor` adapter turns Harbor task directories into runnable HUD
-tasksets and can export authored HUD tasks back to Harbor folders.
+tasksets and can export authored HUD tasks back to Harbor folders. Adapted entrypoints remain
+isolated from verifier processes while supported harnesses receive a `workspace-processes` MCP
+capability for listing and signalling environment processes.
 
 ```python
 from hud.integrations import harbor

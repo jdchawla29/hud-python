@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import logging
 import shlex
+from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING, Any, cast
 
 import mcp.types as mcp_types
 
+from hud.agents import cli_mcp
 from hud.agents.base import Agent
 from hud.agents.cli import (
     WINDOWS_SHELLS,
@@ -213,6 +215,7 @@ def codex_command(
     shell: str,
     executable: str = "codex",
     connection: Connection | None = None,
+    mcp_servers: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     env: dict[str, str] = {}
     sandbox = "danger-full-access" if connection is not None else config.sandbox
@@ -263,6 +266,12 @@ def codex_command(
             )
     elif settings.openai_api_key:
         env["CODEX_API_KEY"] = settings.openai_api_key
+
+    for name, server in (mcp_servers or {}).items():
+        prefix = f"mcp_servers.{json.dumps(name)}"
+        for key in ("command", "args", "url", "bearer_token_env_var"):
+            if key in server:
+                args.extend(["-c", f"{prefix}.{key}={json.dumps(server[key])}"])
 
     args.append("-")
     isolate_home = bool(env)
@@ -319,8 +328,15 @@ async def run_codex(
     prompt: str,
     executable: str = "codex",
     connection: Connection | None = None,
+    mcp_servers: dict[str, dict[str, Any]] | None = None,
 ) -> None:
-    command = codex_command(config, shell, executable, connection=connection)
+    command = codex_command(
+        config,
+        shell,
+        executable,
+        connection=connection,
+        mcp_servers=mcp_servers,
+    )
     logger.info("SSH exec codex CLI (%d chars)", len(command))
     events = CodexEvents(run, model=config.model, started_at=now_iso())
     returncode, stderr = await run_jsonl(
@@ -350,15 +366,33 @@ class CodexCLIAgent(Agent):
             _MANAGED_CODEX_PATHS,
             run.runtime_config,
         )
-        await run_codex(
-            self.config,
-            run,
-            ssh=ssh,
-            shell=ssh.capability.params.get("shell", "bash"),
-            prompt=run.prompt_text,
-            executable=executable,
-            connection=run.connections.get("inference"),
-        )
+        shell = ssh.capability.params.get("shell", "bash")
+        async with AsyncExitStack() as resources:
+            mcp_servers: dict[str, dict[str, Any]] = {}
+            manifest = run.client.manifest
+            assert manifest is not None
+            for cap in manifest.bindings:
+                if (
+                    cap.protocol.split("/", 1)[0] == "mcp"
+                    and cap.params.get("controller_bridge") is True
+                ):
+                    mcp_servers[cap.name] = await resources.enter_async_context(
+                        cli_mcp.bridge_mcp(
+                            ssh,
+                            run.client.binding(cap.name),
+                            shell=shell,
+                        )
+                    )
+            await run_codex(
+                self.config,
+                run,
+                ssh=ssh,
+                shell=shell,
+                prompt=run.prompt_text,
+                executable=executable,
+                connection=run.connections.get("inference"),
+                mcp_servers=mcp_servers,
+            )
 
 
 __all__ = ["CodexCLIAgent"]

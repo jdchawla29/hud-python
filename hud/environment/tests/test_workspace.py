@@ -25,8 +25,11 @@ from unittest import mock
 from unittest.mock import AsyncMock, Mock
 
 import asyncssh
+import fastmcp
 import pytest
+from fastmcp.client.transports import StdioTransport
 
+from hud.agents.cli_mcp import CAPABILITY_ENV
 from hud.capabilities import Connection, SSHClient
 from hud.capabilities.ssh import PROCESS_CONNECTIONS_REQUEST
 from hud.environment import namespace as namespace_mod
@@ -40,6 +43,7 @@ from hud.environment.egress import (
     _UnixServer,
     _Unrelayable,
 )
+from hud.environment.process_control import ProcessControl
 from hud.environment.workspace import Bubblewrap, Mount, Workspace
 from hud.utils.process import ProcessGroup, ProcessResult
 
@@ -960,6 +964,92 @@ def test_process_guard_selects_probed_ptrace_backend(monkeypatch: pytest.MonkeyP
     run.assert_called_once()
 
 
+def test_signal_visible_process_requires_matching_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        namespace_mod,
+        "_visible_processes",
+        lambda: [{"pid": 17, "start_time": 42, "signalable": True}],
+    )
+    kill = Mock()
+    monkeypatch.setattr(os, "kill", kill)
+
+    with pytest.raises(ProcessLookupError, match="process 17 with start time 41"):
+        namespace_mod._signal_visible_process(17, 41, "HUP")
+
+    kill.assert_not_called()
+
+
+def test_signal_visible_process_signals_matching_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        namespace_mod,
+        "_visible_processes",
+        lambda: [{"pid": 17, "start_time": 42, "signalable": True}],
+    )
+    kill = Mock()
+    monkeypatch.setattr(os, "kill", kill)
+
+    namespace_mod._signal_visible_process(17, 42, "HUP")
+
+    kill.assert_called_once_with(17, signal.SIGHUP)
+
+
+def test_signal_visible_process_rejects_non_top_level_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        namespace_mod,
+        "_visible_processes",
+        lambda: [{"pid": 17, "start_time": 42, "signalable": False}],
+    )
+    kill = Mock()
+    monkeypatch.setattr(os, "kill", kill)
+
+    with pytest.raises(PermissionError, match="not a top-level environment process"):
+        namespace_mod._signal_visible_process(17, 42, "HUP")
+
+    kill.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_namespace_host_stops_reaper_while_signalling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = namespace_mod._NamespaceHost(
+        tmp_path / "namespace.sock",
+        setup_loopback=False,
+        holder_argv=[],
+        bwrap="bwrap",
+        launcher_depth=0,
+        map_identities=False,
+        ports=frozenset(),
+    )
+    host.holders["environment"] = (AsyncMock(), 23)
+    calls: list[tuple[str, Any]] = []
+
+    def kill(pid: int, signal_number: int) -> None:
+        calls.append(("kill", (pid, signal_number)))
+
+    async def process_helper(*arguments: str) -> bytes:
+        calls.append(("helper", arguments))
+        return b""
+
+    monkeypatch.setattr(os, "kill", kill)
+    monkeypatch.setattr(host, "_process_helper", process_helper)
+
+    await host._signal_process({"pid": 17, "start_time": 42, "signal": "HUP"})
+
+    assert calls == [
+        ("kill", (23, signal.SIGSTOP)),
+        ("helper", ("--signal-process", "17", "42", "HUP")),
+        ("kill", (23, signal.SIGCONT)),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_namespace_host_only_terminates_a_used_session_holder(
     tmp_path: Path,
@@ -988,6 +1078,71 @@ async def test_namespace_host_only_terminates_a_used_session_holder(
     kill.assert_called_once_with(7, signal.SIGKILL)
     holder.terminate.assert_awaited_once_with()
     holder.wait.assert_not_awaited()
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is required")
+async def test_environment_processes_can_be_listed_and_signalled(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    ready = root / "ready"
+    reloaded = root / "reloaded"
+    ws = Workspace(root, network=True, allowed_hosts=None, require_isolation=True)
+    await ws.start()
+    process = None
+    control = ProcessControl(ws)
+    try:
+        process = await ws.launch(
+            [
+                "sh",
+                "-c",
+                "setsid sh -c \"trap 'touch reloaded' HUP; "
+                'touch ready; while :; do sleep 1; done" >/dev/null 2>&1 &',
+            ],
+            identity=None,
+            persistent=True,
+            scope="environment",
+        )
+        await asyncio.to_thread(_wait_for_path, ready)
+
+        capability = await control.start()
+        assert capability.params["controller_bridge"] is True
+        transport = StdioTransport(
+            sys.executable,
+            ["-m", "hud.agents.cli_mcp"],
+            env={
+                **os.environ,
+                CAPABILITY_ENV: json.dumps(capability.to_manifest(), separators=(",", ":")),
+            },
+        )
+        async with fastmcp.Client(transport) as client:
+            assert {tool.name for tool in await client.list_tools()} == {
+                "list_processes",
+                "signal_process",
+            }
+            listed = await client.call_tool_mcp("list_processes", {})
+            assert listed.structuredContent is not None
+            processes = listed.structuredContent["result"]
+            target = next(
+                item for item in processes if "touch reloaded" in " ".join(item["command"])
+            )
+            assert target["signalable"] is True
+            signalled = await client.call_tool_mcp(
+                "signal_process",
+                {
+                    "pid": target["pid"],
+                    "start_time": target["start_time"],
+                    "signal": "HUP",
+                },
+            )
+            assert not signalled.isError
+        await asyncio.to_thread(_wait_for_path, reloaded)
+        assert await process.wait() == 0
+    finally:
+        await control.close()
+        if process is not None:
+            await process.terminate()
+        await ws.stop()
 
 
 @pytest.mark.asyncio

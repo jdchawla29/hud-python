@@ -271,6 +271,7 @@ for capability in CONFIG["capabilities"]:
     env.add_capability(Capability.from_manifest(capability))
 workspace = env.workspace(
     WORKDIR,
+    process_control=True,
     guest_path=WORKDIR.as_posix(),
     system_mounts=(
         Mount("rw", src="/", dst="/"),

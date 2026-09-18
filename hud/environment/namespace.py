@@ -26,6 +26,17 @@ _AF_NETLINK = getattr(socket, "AF_NETLINK", 16)
 _NETLINK_ROUTE = getattr(socket, "NETLINK_ROUTE", 0)
 LOGGER = logging.getLogger("hud.environment.namespace")
 
+_PROCESS_SIGNALS = frozenset(
+    {
+        "HUP",
+        "INT",
+        "TERM",
+        "KILL",
+        "USR1",
+        "USR2",
+    }
+)
+
 
 async def read_bwrap_pid(info_read: int) -> int:
     """Read the child pid from bwrap's possibly chunked info document."""
@@ -59,6 +70,68 @@ def _child_pids(pid: int) -> list[int]:
             except (OSError, IndexError, ValueError):
                 continue
         return sorted(children)
+
+
+def _visible_processes() -> list[dict[str, Any]]:
+    own_pid = os.getpid()
+    processes: list[dict[str, Any]] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid <= 1 or pid == own_pid:
+            continue
+        try:
+            _, separator, suffix = (entry / "stat").read_text().rpartition(")")
+            fields = suffix.split()
+            if not separator:
+                continue
+            ppid = int(fields[1])
+            start_time = int(fields[19])
+            executable = (entry / "comm").read_text().strip()
+            command = [
+                value.decode("utf-8", "replace")
+                for value in (entry / "cmdline").read_bytes().split(b"\0")
+                if value
+            ]
+        except (OSError, IndexError, ValueError):
+            continue
+        if ppid == 0 or (executable == "sleep" and command == ["sleep", "2147483647"]):
+            continue
+        processes.append(
+            {
+                "pid": pid,
+                "ppid": ppid,
+                "start_time": start_time,
+                "executable": executable,
+                "command": command,
+                "signalable": ppid == 1,
+            }
+        )
+    return sorted(processes, key=lambda process: int(process["pid"]))
+
+
+def _signal_visible_process(pid: int, start_time: int, signal_name: str) -> None:
+    if pid <= 1:
+        raise ValueError("process pid must be greater than 1")
+    if signal_name not in _PROCESS_SIGNALS:
+        raise ValueError(
+            f"unsupported process signal {signal_name!r}; "
+            f"expected one of {', '.join(sorted(_PROCESS_SIGNALS))}"
+        )
+    target = next(
+        (
+            process
+            for process in _visible_processes()
+            if process["pid"] == pid and process["start_time"] == start_time
+        ),
+        None,
+    )
+    if target is None:
+        raise ProcessLookupError(f"process {pid} with start time {start_time} is unavailable")
+    if not target["signalable"]:
+        raise PermissionError(f"process {pid} is not a top-level environment process")
+    os.kill(pid, getattr(signal, f"SIG{signal_name}"))
 
 
 async def install_identity_map(
@@ -242,21 +315,40 @@ class NamespaceHost:
         return NamespaceProcess(process)
 
     async def terminate_sessions(self) -> None:
+        await self._request({"operation": "terminate_sessions"})
+
+    async def processes(self) -> list[dict[str, Any]]:
+        result = await self._request({"operation": "processes.list"})
+        processes = json.loads(result)
+        if not isinstance(processes, list):
+            raise RuntimeError("workspace process response must be a list")
+        return processes
+
+    async def signal_process(self, pid: int, start_time: int, signal_name: str) -> None:
+        await self._request(
+            {
+                "operation": "processes.signal",
+                "pid": pid,
+                "start_time": start_time,
+                "signal": signal_name,
+            }
+        )
+
+    async def _request(self, request: dict[str, Any]) -> bytes:
         connection = await self._open_connection()
         try:
-            result = await connection.run(
-                json.dumps({"operation": "terminate_sessions"}),
-                check=False,
-                encoding=None,
-            )
+            result = await connection.run(json.dumps(request), check=False, encoding=None)
         finally:
             connection.close()
             await connection.wait_closed()
         if result.returncode != 0:
-            stderr = result.stderr or b""
+            stderr = getattr(result, "stderr", None) or b""
             assert isinstance(stderr, bytes)
             detail = stderr.decode("utf-8", "replace").strip()
-            raise RuntimeError(detail or "failed to terminate workspace sessions")
+            raise RuntimeError(detail or "workspace namespace request failed")
+        stdout = getattr(result, "stdout", None) or b""
+        assert isinstance(stdout, bytes)
+        return stdout
 
     def _require_connection(self) -> asyncssh.SSHClientConnection:
         if self._connection is None:
@@ -389,11 +481,18 @@ class _NamespaceHost:
             if process.command is None:
                 raise ValueError("spawn request required")
             request: dict[str, Any] = json.loads(process.command)
-            if request.get("operation") == "terminate_sessions":
-                await self._terminate_sessions()
-                process.exit(0)
-            else:
-                process.exit(await self._spawn(request, process))
+            match request.get("operation"):
+                case "terminate_sessions":
+                    await self._terminate_sessions()
+                    process.exit(0)
+                case "processes.list":
+                    process.stdout.write(json.dumps(await self._list_processes()).encode())
+                    process.exit(0)
+                case "processes.signal":
+                    await self._signal_process(request)
+                    process.exit(0)
+                case _:
+                    process.exit(await self._spawn(request, process))
         except Exception as exc:
             process.stderr.write(f"{type(exc).__name__}: {exc}".encode())
             process.exit(1)
@@ -479,6 +578,71 @@ class _NamespaceHost:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(holder_pid, signal.SIGKILL)
             await holder.terminate()
+
+    async def _list_processes(self) -> list[dict[str, Any]]:
+        output = await self._process_helper("--list-processes")
+        processes = json.loads(output)
+        if not isinstance(processes, list):
+            raise RuntimeError("workspace process helper returned an invalid response")
+        return processes
+
+    async def _signal_process(self, request: dict[str, Any]) -> None:
+        pid = request.get("pid")
+        start_time = request.get("start_time")
+        signal_name = request.get("signal")
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
+            raise ValueError("process pid must be an integer greater than 1")
+        if not isinstance(start_time, int) or isinstance(start_time, bool) or start_time < 0:
+            raise ValueError("process start_time must be a non-negative integer")
+        if not isinstance(signal_name, str) or signal_name not in _PROCESS_SIGNALS:
+            raise ValueError(
+                f"unsupported process signal {signal_name!r}; "
+                f"expected one of {', '.join(sorted(_PROCESS_SIGNALS))}"
+            )
+        held = self.holders.get("environment")
+        if held is None:
+            raise RuntimeError("workspace environment process namespace is not running")
+        _, holder_pid = held
+        os.kill(holder_pid, signal.SIGSTOP)
+        try:
+            # The holder is PID 1 and reaps every process in this namespace.
+            # Keeping it stopped prevents PID reuse between the identity check
+            # and signal delivery on substrates where pidfds are unavailable.
+            await self._process_helper(
+                "--signal-process",
+                str(pid),
+                str(start_time),
+                signal_name,
+            )
+        finally:
+            os.kill(holder_pid, signal.SIGCONT)
+
+    async def _process_helper(self, *arguments: str) -> bytes:
+        held = self.holders.get("environment")
+        if held is None:
+            raise RuntimeError("workspace environment process namespace is not running")
+        _, holder_pid = held
+        result = await create_process_group_exec(
+            shutil.which("nsenter") or "/usr/bin/nsenter",
+            "--target",
+            str(holder_pid),
+            "--pid",
+            "--preserve-credentials",
+            "--",
+            shutil.which("unshare") or "/usr/bin/unshare",
+            "--mount-proc",
+            sys.executable,
+            "-m",
+            "hud.environment.namespace",
+            *arguments,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        completed = await result.complete()
+        if completed.returncode != 0:
+            detail = completed.stderr.decode("utf-8", "replace").strip()
+            raise RuntimeError(detail or "workspace process helper failed")
+        return completed.stdout
 
     async def _spawn(
         self,
@@ -675,10 +839,26 @@ class _NamespaceHost:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("socket", type=Path)
+    parser.add_argument("socket", type=Path, nargs="?")
     parser.add_argument("--setup-loopback", action="store_true")
     parser.add_argument("--port", action="append", type=int, default=[])
+    helper = parser.add_mutually_exclusive_group()
+    helper.add_argument("--list-processes", action="store_true")
+    helper.add_argument(
+        "--signal-process",
+        nargs=3,
+        metavar=("PID", "START_TIME", "SIGNAL"),
+    )
     args = parser.parse_args()
+    if args.list_processes:
+        sys.stdout.write(json.dumps(_visible_processes()))
+        return
+    if args.signal_process is not None:
+        raw_pid, raw_start_time, signal_name = args.signal_process
+        _signal_visible_process(int(raw_pid), int(raw_start_time), signal_name)
+        return
+    if args.socket is None:
+        parser.error("socket is required")
     config = json.loads(sys.stdin.buffer.readline())
     asyncio.run(
         _NamespaceHost(

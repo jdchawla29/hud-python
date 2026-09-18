@@ -1492,6 +1492,18 @@ class Workspace:
         if self._namespace is not None:
             await self._namespace.terminate_sessions()
 
+    async def processes(self) -> list[dict[str, Any]]:
+        """Return processes visible in the workspace's environment PID namespace."""
+        if self._namespace is None:
+            return []
+        return await self._namespace.processes()
+
+    async def signal_process(self, pid: int, start_time: int, signal_name: str) -> None:
+        """Signal one process in the workspace's environment PID namespace."""
+        if self._namespace is None:
+            raise RuntimeError("workspace sandbox is not running")
+        await self._namespace.signal_process(pid, start_time, signal_name)
+
     def shell_argv(
         self,
         command: str | None = None,

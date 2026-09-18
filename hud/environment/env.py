@@ -272,6 +272,7 @@ class Environment:
         *,
         name: str = "shell",
         track_files: bool | None = None,
+        process_control: bool = False,
         **kwargs: Any,
     ) -> Workspace:
         """Attach a :class:`Workspace` serving ``name`` over ``ssh/2``.
@@ -292,16 +293,25 @@ class Environment:
             raise ValueError(f"workspace capability {name!r} is already attached")
         ws = Workspace(root, track_files=track_files, **kwargs)
         self._workspaces[name] = ws
+        control = None
 
         @self.initialize
         async def _up() -> None:
+            nonlocal control
             await ws.start()
             self.add_capability(ws.capability(name))
             if ws.tracks_files:
                 self.add_capability(ws.file_tracking_capability())
+            if process_control:
+                from .process_control import ProcessControl
+
+                control = ProcessControl(ws)
+                self.add_capability(await control.start())
 
         @self.shutdown
         async def _down() -> None:
+            if control is not None:
+                await control.close()
             await ws.stop()
 
         return ws

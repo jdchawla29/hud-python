@@ -23,8 +23,9 @@ import fastmcp
 import pytest
 from mcp.types import ImageContent, TextContent
 
+from hud.agents import cli_mcp
 from hud.agents.claude.sdk import computer_mcp
-from hud.agents.claude.sdk.agent import ClaudeCLIAgent
+from hud.agents.claude.sdk.agent import _MANAGED_CLAUDE_PATHS, ClaudeCLIAgent
 from hud.agents.tests.cli_fakes import FakeProcess as _FakeStreamProcess
 from hud.agents.tests.cli_fakes import fake_run as _fake_run
 from hud.agents.types import AgentStep, ClaudeCLIConfig, ToolStep
@@ -66,6 +67,15 @@ def test_command_follows_explicit_gateway_routing(monkeypatch: pytest.MonkeyPatc
     assert "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS" not in provider
     assert "DISABLE_AUTO_COMPACT" not in provider
     assert "ANTHROPIC_MODEL=claude-sonnet-5" in provider
+
+
+def test_managed_bundle_paths_cover_claude_linux_release_platforms() -> None:
+    assert _MANAGED_CLAUDE_PATHS == {
+        "linux-arm64": "/usr/local/lib/agents/claude/linux-arm64/claude",
+        "linux-arm64-musl": "/usr/local/lib/agents/claude/linux-arm64-musl/claude",
+        "linux-x64": "/usr/local/lib/agents/claude/linux-x64/claude",
+        "linux-x64-musl": "/usr/local/lib/agents/claude/linux-x64-musl/claude",
+    }
 
 
 def test_command_uses_process_bound_connection_without_its_credential() -> None:
@@ -516,6 +526,85 @@ async def test_manifest_mcp_capability_is_written_for_remote_claude(
     execute.assert_awaited_once()
 
 
+async def test_controller_mcp_capability_is_bridged_for_remote_claude(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shell = Capability(
+        name="shell",
+        protocol="ssh/2",
+        url="ssh://localhost:22",
+        params={"shell": "bash"},
+    )
+    mcp = Capability.mcp(
+        name="workspace-processes",
+        url="http://environment:8000/mcp",
+        transport="streamable-http",
+    )
+    mcp.params["controller_bridge"] = True
+    routed = Capability.mcp(
+        name="workspace-processes",
+        url="http://127.0.0.1:41000/mcp",
+        transport="streamable-http",
+    )
+    routed.params["controller_bridge"] = True
+    ssh = SSHClient(shell, cast("Any", object()))
+    bridge_active = False
+
+    class Client:
+        manifest = SimpleNamespace(bindings=[shell, mcp])
+
+        async def open(self, ref: str) -> SSHClient:
+            assert ref == "ssh"
+            return ssh
+
+        def binding(self, ref: str) -> Capability:
+            assert ref == "workspace-processes"
+            return routed
+
+    @asynccontextmanager
+    async def bridge(
+        bridge_ssh: SSHClient,
+        capability: Capability,
+        *,
+        shell: str,
+    ) -> Any:
+        nonlocal bridge_active
+        assert bridge_ssh is ssh
+        assert capability is routed
+        assert shell == "bash"
+        bridge_active = True
+        try:
+            yield {"type": "stdio", "command": "sh", "args": ["-c", "relay"]}
+        finally:
+            bridge_active = False
+
+    async def execute(*_args: Any, **kwargs: Any) -> None:
+        assert bridge_active
+        assert kwargs["mcp_servers"] == {
+            "workspace-processes": {
+                "type": "stdio",
+                "command": "sh",
+                "args": ["-c", "relay"],
+            }
+        }
+
+    agent = ClaudeCLIAgent()
+    monkeypatch.setattr("hud.agents.claude.sdk.agent.cli_mcp.bridge_mcp", bridge)
+    monkeypatch.setattr(agent, "_exec", execute)
+    await agent(
+        cast(
+            "Any",
+            SimpleNamespace(
+                client=Client(),
+                prompt_text="reload the service",
+                runtime_config=None,
+                connections={},
+            ),
+        )
+    )
+    assert not bridge_active
+
+
 async def test_remote_claude_passes_screenshot_encoding_to_computer_mcp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -778,8 +867,8 @@ async def test_computer_mcp_bridge_uses_controller_python_and_owns_resources(
     ssh = SimpleNamespace(create_process=connection.create_process)
     local = _LocalComputerProcess()
     spawn = AsyncMock(return_value=local)
-    monkeypatch.setattr(computer_mcp.asyncio, "create_subprocess_exec", spawn)
-    monkeypatch.setattr(computer_mcp.secrets, "token_hex", lambda _length: "bridge-token")
+    monkeypatch.setattr(cli_mcp.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(cli_mcp.secrets, "token_hex", lambda _length: "bridge-token")
     screen = Capability.rfb(name="screen", url="rfb://127.0.0.1:41000", display=0)
     encoding = WebPScreenshotEncoding(quality=42)
 
@@ -824,6 +913,32 @@ async def test_computer_mcp_bridge_uses_controller_python_and_owns_resources(
     assert not local.killed
 
 
+async def test_mcp_proxy_uses_supported_fastmcp_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capability = Capability(
+        name="database",
+        protocol="mcp/1",
+        url="http://database:8000/mcp",
+        params={"transport": "streamable-http", "auth_token": "token"},
+    )
+    transport = object()
+    proxy = SimpleNamespace(run_async=AsyncMock())
+    transport_factory = Mock(return_value=transport)
+    proxy_factory = Mock(return_value=proxy)
+    monkeypatch.setattr(cli_mcp, "StreamableHttpTransport", transport_factory)
+    monkeypatch.setattr(cli_mcp, "create_proxy", proxy_factory)
+
+    await cli_mcp.run_mcp_proxy({cli_mcp.CAPABILITY_ENV: json.dumps(capability.to_manifest())})
+
+    transport_factory.assert_called_once_with(
+        capability.url,
+        headers={"Authorization": "Bearer token"},
+    )
+    proxy_factory.assert_called_once_with(transport, name=capability.name)
+    proxy.run_async.assert_awaited_once_with(transport="stdio", show_banner=False)
+
+
 async def test_computer_mcp_bridge_rejects_windows_before_starting_resources() -> None:
     screen = Capability.rfb(name="screen", url="rfb://127.0.0.1:41000", display=0)
     ssh = SimpleNamespace(create_process=AsyncMock())
@@ -844,7 +959,7 @@ async def test_computer_mcp_fifo_relay_is_bidirectional(tmp_path: Path) -> None:
     request_path = str(tmp_path / "request")
     response_path = str(tmp_path / "response")
     bridge = await asyncio.create_subprocess_shell(
-        computer_mcp._bridge_command(request_path, response_path),
+        cli_mcp._bridge_command(request_path, response_path),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -853,7 +968,7 @@ async def test_computer_mcp_fifo_relay_is_bidirectional(tmp_path: Path) -> None:
     try:
         assert bridge.stderr is not None
         assert await asyncio.wait_for(bridge.stderr.readline(), 2) == b"ready\n"
-        config = computer_mcp._relay_config(request_path, response_path)
+        config = cli_mcp._relay_config(request_path, response_path)
         relay = await asyncio.create_subprocess_exec(
             config["command"],
             *config["args"],

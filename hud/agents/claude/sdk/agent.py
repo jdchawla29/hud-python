@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import asyncssh
 
+from hud.agents import cli_mcp
 from hud.agents.base import Agent
 from hud.agents.cli import (
     WINDOWS_SHELLS,
@@ -43,6 +44,8 @@ MCP_CONFIG_PATH = ".hud_mcp_config.json"
 RUN_SCRIPT_PATH = ".hud_run.bat"
 
 _MANAGED_CLAUDE_PATHS = {
+    "linux-arm64": "/usr/local/lib/agents/claude/linux-arm64/claude",
+    "linux-arm64-musl": "/usr/local/lib/agents/claude/linux-arm64-musl/claude",
     "linux-x64": "/usr/local/lib/agents/claude/linux-x64/claude",
     "linux-x64-musl": "/usr/local/lib/agents/claude/linux-x64-musl/claude",
 }
@@ -80,11 +83,22 @@ class ClaudeCLIAgent(Agent):
             for cap in bindings:
                 family = cap.protocol.split("/", 1)[0]
                 if family == "mcp":
-                    token = cap.params.get("auth_token")
-                    transport = "http" if cap.params["transport"] == "streamable-http" else "sse"
-                    server_config: dict[str, Any] = {"type": transport, "url": cap.url}
-                    if token:
-                        server_config["headers"] = {"Authorization": f"Bearer {token}"}
+                    if cap.params.get("controller_bridge") is True:
+                        server_config = await resources.enter_async_context(
+                            cli_mcp.bridge_mcp(
+                                ssh,
+                                run.client.binding(cap.name),
+                                shell=shell,
+                            )
+                        )
+                    else:
+                        token = cap.params.get("auth_token")
+                        transport = (
+                            "http" if cap.params["transport"] == "streamable-http" else "sse"
+                        )
+                        server_config = {"type": transport, "url": cap.url}
+                        if token:
+                            server_config["headers"] = {"Authorization": f"Bearer {token}"}
                     if cap.name in mcp_servers:
                         raise RuntimeError(f"duplicate MCP server name {cap.name!r}")
                     mcp_servers[cap.name] = server_config
