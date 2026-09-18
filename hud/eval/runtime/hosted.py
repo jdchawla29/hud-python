@@ -110,6 +110,29 @@ class HostedRuntime:
         run.group_id = group_id
         return run
 
+    async def submit(
+        self,
+        task: Task,
+        agent: Agent,
+        *,
+        job_id: str,
+        group_id: str | None = None,
+        trace_id: str | None = None,
+    ) -> str:
+        """Submit one hosted rollout without waiting for its terminal result."""
+        trace_id = trace_id or uuid.uuid4().hex
+        validate_rollout_timeouts(
+            task,
+            agent,
+            None,
+            actor_runtime_config=task.runtime_config,
+            verifier_runtime_config=(
+                task.verifier.runtime_config if task.verifier is not None else None
+            ),
+        )
+        await self._submit(task, agent, job_id=job_id, group_id=group_id, trace_id=trace_id)
+        return trace_id
+
     async def _submit_and_await(
         self,
         task: Task,
@@ -119,6 +142,27 @@ class HostedRuntime:
         group_id: str | None,
         trace_id: str,
     ) -> dict[str, Any]:
+        platform = PlatformClient.from_settings()
+        await self._submit(
+            task,
+            agent,
+            job_id=job_id,
+            group_id=group_id,
+            trace_id=trace_id,
+            platform=platform,
+        )
+        return await self._await_terminal(platform, str(uuid.UUID(trace_id)))
+
+    async def _submit(
+        self,
+        task: Task,
+        agent: Agent,
+        *,
+        job_id: str,
+        group_id: str | None,
+        trace_id: str,
+        platform: PlatformClient | None = None,
+    ) -> None:
         from hud.agents.registry import dump_agent
 
         spec = dump_agent(agent)
@@ -127,7 +171,7 @@ class HostedRuntime:
                 **spec,
                 "config": {**spec.get("config", {}), **task.agent_config},
             }
-        platform = PlatformClient.from_settings()
+        platform = platform or PlatformClient.from_settings()
         if not platform.api_key:
             raise RuntimeError("HUD-hosted execution requires HUD_API_KEY")
         payload: dict[str, Any] = {
@@ -149,7 +193,6 @@ class HostedRuntime:
         if task.verifier is not None:
             payload["verifier"] = task.verifier.model_dump(mode="json", exclude_none=True)
         await platform.apost("/rollouts/submit", json=payload)
-        return await self._await_terminal(platform, payload["trace_id"])
 
     @staticmethod
     def _fold(state: dict[str, Any], trace_id: str) -> Run:

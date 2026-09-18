@@ -362,5 +362,62 @@ class Taskset:
             logger.warning("telemetry flush did not fully drain within 120s; some spans may lag")
         return job
 
+    async def submit(
+        self,
+        agent: Agent,
+        *,
+        runtime: HostedRuntime | None = None,
+        group: int | None = None,
+        max_concurrent: int | None = None,
+        job: Job | None = None,
+    ) -> Job:
+        """Submit every hosted rollout and return once the platform accepts them.
+
+        ``max_concurrent`` bounds concurrent submission requests. Execution is
+        platform-owned after acceptance; use :meth:`run` when the caller needs
+        terminal rewards and trajectories before returning.
+        """
+        if max_concurrent is not None and max_concurrent < 1:
+            raise ValueError("max_concurrent must be >= 1")
+
+        task_list = list(self)
+        group = group or (job.group if job else 1)
+        if group < 1:
+            raise ValueError("group must be >= 1")
+
+        expanded: list[tuple[Task, str]] = []
+        for task in task_list:
+            group_id = uuid.uuid4().hex
+            expanded.extend((task, group_id) for _ in range(group))
+
+        if job is None:
+            job = Job(
+                id=uuid.uuid4().hex,
+                name=_job_name(self.name, task_list, group),
+                group=group,
+                taskset_id=self.taskset_id,
+            )
+            await job_enter(job.id, name=job.name, group=group, taskset_id=self.taskset_id)
+
+        hosted = runtime or HostedRuntime()
+        sem = asyncio.Semaphore(max_concurrent) if max_concurrent else None
+
+        async def _submit(task: Task, group_id: str) -> str:
+            if sem is None:
+                return await hosted.submit(task, agent, job_id=job.id, group_id=group_id)
+            async with sem:
+                return await hosted.submit(task, agent, job_id=job.id, group_id=group_id)
+
+        logger.info(
+            "submitting %d hosted rollouts (%d tasks x %d group)%s",
+            len(expanded),
+            len(task_list),
+            group,
+            f", max_concurrent={max_concurrent}" if max_concurrent else "",
+        )
+        trace_ids = await asyncio.gather(*(_submit(task, gid) for task, gid in expanded))
+        job.submitted_trace_ids.extend(trace_ids)
+        return job
+
 
 __all__ = ["Job", "Taskset"]

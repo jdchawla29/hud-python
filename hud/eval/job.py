@@ -41,6 +41,8 @@ class Job:
     #: Platform taskset id this job runs, when it's a synced taskset
     #: (``Taskset.from_api``). Links the job to that taskset on the platform.
     taskset_id: str | None = None
+    #: Hosted trace ids accepted by the platform before their results are available.
+    submitted_trace_ids: list[str] = field(default_factory=list)
 
     @classmethod
     async def start(cls, name: str, *, group: int = 1, taskset_id: str | None = None) -> Job:

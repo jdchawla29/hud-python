@@ -254,6 +254,61 @@ async def test_run_submits_and_polls_to_terminal(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.asyncio
+async def test_submit_returns_after_platform_acceptance(monkeypatch: pytest.MonkeyPatch) -> None:
+    platform = _FakePlatform([])
+    monkeypatch.setattr(
+        "hud.eval.runtime.hosted.PlatformClient.from_settings", classmethod(lambda cls: platform)
+    )
+    trace_id = uuid.uuid4().hex
+    job_id = uuid.uuid4().hex
+
+    submitted = await HostedRuntime().submit(
+        Task(env="sums", id="add", slug="sums-add", args={"a": 1, "b": 2}),
+        _agent(),
+        job_id=job_id,
+        group_id="g1",
+        trace_id=trace_id,
+    )
+
+    assert submitted == trace_id
+    assert platform.polled == 0
+    assert len(platform.posts) == 1
+    path, payload = platform.posts[0]
+    assert path == "/rollouts/submit"
+    assert payload["trace_id"] == str(uuid.UUID(trace_id))
+    assert payload["job_id"] == str(uuid.UUID(job_id))
+
+
+@pytest.mark.asyncio
+async def test_taskset_submit_accepts_every_rollout_without_polling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    platform = _FakePlatform([])
+    monkeypatch.setattr(
+        "hud.eval.runtime.hosted.PlatformClient.from_settings", classmethod(lambda cls: platform)
+    )
+    taskset = Taskset(
+        "sums",
+        [
+            Task(env="sums", id="add", slug="first", args={"a": 1, "b": 2}),
+            Task(env="sums", id="add", slug="second", args={"a": 3, "b": 4}),
+        ],
+    )
+
+    job = await taskset.submit(_agent(), group=2)
+
+    submissions = [(path, body) for path, body in platform.posts if path == "/rollouts/submit"]
+    assert len(submissions) == 4
+    assert platform.polled == 0
+    assert job.runs == []
+    assert len(job.submitted_trace_ids) == 4
+    assert {body["job_id"] for _, body in submissions} == {str(uuid.UUID(job.id))}
+    assert {body["trace_id"] for _, body in submissions} == {
+        str(uuid.UUID(trace_id)) for trace_id in job.submitted_trace_ids
+    }
+
+
+@pytest.mark.asyncio
 async def test_run_submits_registered_cli_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     platform = _FakePlatform([{"status": "completed", "reward": 1.0}])
     monkeypatch.setattr(

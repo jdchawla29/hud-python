@@ -26,11 +26,13 @@ infra, so there's no local process to manage - you start a run from the terminal
 and both trace to the same place.
 
 **From the terminal**, pass the taskset name or id to `hud eval`. The tasks are fetched from the platform
-and each rollout runs remotely on hosted infra.
+and each rollout runs remotely on hosted infra. The command returns after submission; add `--wait` to
+keep it attached until every rollout reaches a terminal state.
 
 ```bash
 hud eval "My Taskset" claude
 hud eval "My Taskset" claude --all --group 3
+hud eval "My Taskset" claude --all --wait
 ```
 
 **From the platform**, open [hud.ai](https://hud.ai), pick the environment, choose a taskset and a model,

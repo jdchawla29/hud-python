@@ -317,6 +317,69 @@ def test_resolve_runtime_slug_defaults_to_remote() -> None:
     assert cfg.remote is True
 
 
+@pytest.mark.asyncio
+async def test_remote_evaluation_submits_without_waiting(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hud.eval import Job, Task, Taskset
+    from hud.settings import settings
+
+    taskset = Taskset("remote", [Task(env="sums", id="add")])
+    submitted = False
+    monkeypatch.setattr(settings, "api_key", "sk-hud-test")
+
+    async def submit(self: Taskset, *args: object, **kwargs: object) -> Job:
+        nonlocal submitted
+        submitted = True
+        return Job(
+            id="00000000000000000000000000000001",
+            name=self.name,
+            submitted_trace_ids=["00000000000000000000000000000002"],
+        )
+
+    async def run(self: Taskset, *args: object, **kwargs: object) -> Job:
+        raise AssertionError("remote evaluation polled for completion")
+
+    monkeypatch.setattr(Taskset, "from_api", classmethod(lambda cls, source: taskset))
+    monkeypatch.setattr(Taskset, "submit", submit)
+    monkeypatch.setattr(Taskset, "run", run)
+    monkeypatch.setattr(eval_mod, "_build_agent", lambda cfg: object())
+
+    job = await eval_mod._run_evaluation(
+        EvalConfig(source="remote", agent_type="openai", remote=True, all=True)
+    )
+
+    assert submitted is True
+    assert job.submitted_trace_ids == ["00000000000000000000000000000002"]
+
+
+@pytest.mark.asyncio
+async def test_remote_evaluation_waits_when_requested(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hud.eval import Job, Task, Taskset
+    from hud.settings import settings
+
+    taskset = Taskset("remote", [Task(env="sums", id="add")])
+    waited = False
+    monkeypatch.setattr(settings, "api_key", "sk-hud-test")
+
+    async def submit(self: Taskset, *args: object, **kwargs: object) -> Job:
+        raise AssertionError("waiting remote evaluation used detached submission")
+
+    async def run(self: Taskset, *args: object, **kwargs: object) -> Job:
+        nonlocal waited
+        waited = True
+        return Job(id="00000000000000000000000000000001", name=self.name)
+
+    monkeypatch.setattr(Taskset, "from_api", classmethod(lambda cls, source: taskset))
+    monkeypatch.setattr(Taskset, "submit", submit)
+    monkeypatch.setattr(Taskset, "run", run)
+    monkeypatch.setattr(eval_mod, "_build_agent", lambda cfg: object())
+
+    await eval_mod._run_evaluation(
+        EvalConfig(source="remote", agent_type="openai", remote=True, wait=True, all=True)
+    )
+
+    assert waited is True
+
+
 def test_resolve_runtime_explicit_runtime_is_honored() -> None:
     cfg = EvalConfig(source="My Tasks", runtime="hud").resolve_runtime()
     assert cfg.runtime == "hud"

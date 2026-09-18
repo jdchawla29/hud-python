@@ -273,6 +273,7 @@ class EvalConfig(BaseModel):
         "gateway",
         "runtime",
         "remote",
+        "wait",
     }
     source: str | None = None
     agent_type: AgentType | None = None
@@ -293,6 +294,8 @@ class EvalConfig(BaseModel):
     runtime: str | None = None
     #: Run the whole rollout remotely on the HUD platform.
     remote: bool = False
+    #: Wait for hosted traces to finish instead of returning after submission.
+    wait: bool = False
 
     agent_config: dict[str, Any] = Field(default_factory=dict)
 
@@ -511,6 +514,7 @@ class EvalConfig(BaseModel):
         task_ids: str | None = None,
         runtime: str | None = None,
         remote: bool = False,
+        wait: bool = False,
     ) -> EvalConfig:
         """Merge CLI args (non-None values override config)."""
         if runtime is not None and remote:
@@ -555,6 +559,7 @@ class EvalConfig(BaseModel):
             "auto_respond": auto_respond,
             "gateway": gateway,
             "remote": remote,
+            "wait": wait,
         }.items():
             if value:
                 overrides[key] = True
@@ -619,6 +624,8 @@ class EvalConfig(BaseModel):
             )
         table.add_row("all", str(self.all))
         table.add_row("max_steps", str(self.max_steps))
+        if self.remote:
+            table.add_row("wait", str(self.wait))
         table.add_row("max_concurrent", str(self.max_concurrent))
         if self.group_size > 1:
             table.add_row("group_size", str(self.group_size))
@@ -793,7 +800,7 @@ async def _run_evaluation(cfg: EvalConfig) -> Any:
     if cfg.source is None or cfg.agent_type is None:
         raise ValueError("source and agent_type must be set")
 
-    from hud.eval import Taskset
+    from hud.eval import HostedRuntime, Taskset
 
     source_path = Path(cfg.source)
     is_local = await asyncio.to_thread(source_path.exists)
@@ -856,13 +863,24 @@ async def _run_evaluation(cfg: EvalConfig) -> Any:
     agent = _build_agent(cfg)
     placement = _resolve_placement(cfg, source_path if is_local else None, taskset)
 
-    job = await taskset.run(
-        agent,
-        runtime=placement,
-        group=cfg.group_size,
-        max_concurrent=cfg.max_concurrent,
-    )
-    if job.runs and settings.telemetry_enabled and settings.api_key:
+    if cfg.remote and not cfg.wait:
+        if not isinstance(placement, HostedRuntime):
+            raise ValueError("remote submission requires HostedRuntime placement")
+        job = await taskset.submit(
+            agent,
+            runtime=placement,
+            group=cfg.group_size,
+            max_concurrent=cfg.max_concurrent,
+        )
+        hud_console.success(f"Submitted {len(job.submitted_trace_ids)} rollout(s)")
+    else:
+        job = await taskset.run(
+            agent,
+            runtime=placement,
+            group=cfg.group_size,
+            max_concurrent=cfg.max_concurrent,
+        )
+    if settings.api_key and (cfg.remote or (settings.telemetry_enabled and job.runs)):
         hud_console.info(f"{settings.hud_web_url}/jobs/{job.id}")
 
     return job
@@ -921,6 +939,11 @@ def eval_command(
         "--remote",
         help="Run the whole rollout remotely on the HUD platform",
     ),
+    wait: bool = typer.Option(
+        False,
+        "--wait",
+        help="Wait for remote rollouts to finish instead of returning after submission",
+    ),
 ) -> None:
     """Run evaluation on datasets or individual tasks with agents.
 
@@ -962,6 +985,7 @@ def eval_command(
             gateway=gateway,
             runtime=runtime,
             remote=remote,
+            wait=wait,
         )
     except ValueError as e:
         hud_console.error(str(e))

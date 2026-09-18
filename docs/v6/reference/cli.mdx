@@ -87,7 +87,7 @@ hud eval env.py claude --full                     # every task, auto-respond, 10
 - Docker - unless your env explicitly uses `DockerRuntime`
 - An SSH connection - the gateway timeout only applies when `env.workspace()` is declared
 
-For a platform taskset, pass its name or id directly: `hud eval "My Tasks" claude`. The tasks are fetched from the platform and the rollouts run remotely by default, since the env source is not on disk.
+For a platform taskset, pass its name or id directly: `hud eval "My Tasks" claude`. The tasks are fetched from the platform and the rollouts run remotely by default, since the env source is not on disk. The command returns after every selected rollout is accepted and prints the job URL; pass `--wait` when the invoking process needs to wait for terminal rewards.
 
 **Single-task runs** show step-by-step progress (step number + tool calls). Multi-task batches are silent unless `--verbose` is passed.
 
@@ -98,7 +98,7 @@ For a platform taskset, pass its name or id directly: `hud eval "My Tasks" claud
 | `--model`, `-m` | Model id. |
 | `--gateway`, `-g` | Force LLM calls through the HUD gateway. Implied when only `HUD_API_KEY` is set (no provider key); pass it to force the gateway when a provider key is also present. |
 | `--group` (alias `--group-size`) | Runs per task - a group of repeats whose reward spread you can inspect. |
-| `--max-concurrent` | Cap parallel rollouts. |
+| `--max-concurrent` | Cap parallel rollouts for local or waiting runs, and concurrent submission requests for detached remote runs. |
 | `--max-steps` | Cap steps per task (default 10). |
 | `--task-ids` | Comma-separated slugs or 0-based indices. |
 | `--config`, `-c` | Agent config `key=value` (repeatable). |
@@ -106,6 +106,7 @@ For a platform taskset, pass its name or id directly: `hud eval "My Tasks" claud
 | `--very-verbose`, `-vv` | Debug-level logs. |
 | `--runtime` | Placement: `local` (a child process per rollout, serving the env source — `SubprocessRuntime`), `hud` (HUD runtime tunnel), or `tcp://host:port`. Defaults to `local` for a tasks file; platform tasksets default to remote hosted execution. |
 | `--remote` | Run the whole rollout remotely on the HUD platform. |
+| `--wait` | Wait for remotely hosted rollouts to finish. Without it, remote eval returns after submission. |
 | `--yes`, `-y` | Skip confirmation prompt. |
 
 ## Run a packaged image
